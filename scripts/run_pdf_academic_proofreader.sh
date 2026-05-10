@@ -27,7 +27,7 @@ if [ "$MODE" = "annotate" ] && [ -z "$FINDINGS_JSON" ]; then
 fi
 
 if [ "$MODE" = "auto" ]; then
-  echo "Warning: auto mode runs rule-based checks only. For deep editorial review, use scan + manual review + annotate."
+  echo "Notice: auto mode runs local rules + optional API review (controlled by config.json)."
 fi
 
 if command -v python3 >/dev/null 2>&1; then

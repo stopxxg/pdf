@@ -21,7 +21,7 @@ import re
 import sys
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Iterable, Iterator
+from typing import Any, Iterable, Iterator
 
 try:
     import fitz  # type: ignore
@@ -378,7 +378,29 @@ def extract_page_text(page: fitz.Page) -> str:
             full.append(b)
 
     # Dual-column heuristic: substantial text blocks on both sides
-    is_dual = len(left) >= 3 and len(right) >= 3
+    # AND at least one column has continuous vertical coverage >= 30% of page height
+    # (to avoid misclassifying cover pages with scattered elements)
+    def _vertical_coverage(blocks: list[tuple]) -> float:
+        if not blocks:
+            return 0.0
+        ys = sorted([b[1] for b in blocks])
+        total = 0.0
+        current_start = ys[0]
+        current_end = ys[0]
+        for y in ys[1:]:
+            if y <= current_end + 20:
+                current_end = y
+            else:
+                total += current_end - current_start
+                current_start = y
+                current_end = y
+        total += current_end - current_start
+        ph = page.rect.height
+        return total / ph if ph > 0 else 0.0
+
+    left_cov = _vertical_coverage(left)
+    right_cov = _vertical_coverage(right)
+    is_dual = len(left) >= 3 and len(right) >= 3 and left_cov >= 0.30 and right_cov >= 0.30
     if not is_dual:
         return page.get_text("text") or ""
 
@@ -413,6 +435,100 @@ def write_text_artifacts(doc: fitz.Document, pdf: Path, artifact_dir: Path) -> N
         chunks.append(f"===== PAGE {page_no} =====\n{text}\n")
         (paper_dir / f"page_{page_no:03d}.txt").write_text(text, encoding="utf-8")
     (paper_dir / "fulltext.txt").write_text("\n".join(chunks), encoding="utf-8")
+
+    # Also generate Markdown with italic markup for API review
+    try:
+        from pdf_module.pdf_text_converter import pdf_to_markdown
+        md = pdf_to_markdown(pdf, apply_markup=True)
+        (paper_dir / "fulltext.md").write_text(md, encoding="utf-8")
+    except Exception:
+        pass
+
+
+def run_api_review(pdf: Path, artifact_dir: Path) -> list[Finding]:
+    """Run API review on a PDF and return findings with precise coordinates."""
+    try:
+        from pdf_module.pdf_ai_client import ModelConfig, review_markdown, _resolve_api_key, _resolve_base_url, _resolve_model_name
+        from pdf_module.pdf_annotator import map_api_findings
+    except Exception:
+        return []
+
+    project_root = Path(__file__).resolve().parent.parent
+    config_path = project_root / "config.json"
+    prompt_path = project_root / "prompt.json"
+
+    if not config_path.exists():
+        return []
+
+    try:
+        cfg = json.loads(config_path.read_text(encoding="utf-8"))
+    except Exception:
+        return []
+
+    if not cfg.get("auto_enable_api_review", False):
+        return []
+
+    provider = str(cfg.get("provider", "doubao")).strip().lower()
+    try:
+        api_key = _resolve_api_key(provider)
+    except Exception:
+        return []
+
+    base_url = _resolve_base_url(provider, str(cfg.get("base_url", "")))
+    model_name = _resolve_model_name(provider, str(cfg.get("model_name", "")))
+
+    model_cfg = ModelConfig(
+        provider=provider,
+        model_name=model_name,
+        base_url=base_url,
+        api_key=api_key,
+        temperature=float(cfg.get("temperature", 0.3)),
+        top_p=float(cfg.get("top_p", 1.0)),
+        max_tokens=int(cfg.get("max_tokens", 4096)),
+        timeout=int(cfg.get("timeout_seconds", 120)),
+        stream=bool(cfg.get("stream", False)),
+        enable_prompt_cache=bool(cfg.get("enable_prompt_cache", False)),
+    )
+
+    prompt = ""
+    if prompt_path.exists():
+        try:
+            p = json.loads(prompt_path.read_text(encoding="utf-8"))
+            prompt = str(p.get("full_doc_prompt", ""))
+        except Exception:
+            pass
+
+    md_path = artifact_dir / pdf.stem / "fulltext.md"
+    if not md_path.exists():
+        return []
+
+    md_text = md_path.read_text(encoding="utf-8")
+    result = review_markdown(md_text, model_cfg, prompt=prompt)
+
+    if not result.issues:
+        return []
+
+    mapped = map_api_findings(pdf, result.issues)
+    findings: list[Finding] = []
+    for mf in mapped.findings:
+        findings.append(
+            Finding(
+                file=mf.file,
+                page=mf.page,
+                target=mf.target,
+                category=mf.category,
+                suggestion=mf.suggestion,
+                severity=mf.severity,
+                source="api",
+                fallback_rect=mf.fallback_rect,
+            )
+        )
+
+    if mapped.missed:
+        missed_path = artifact_dir / pdf.stem / "api_missed.json"
+        missed_path.write_text(json.dumps(mapped.missed, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    return findings
 
 
 def collect_candidates(pdf: Path, output_dir: Path, render_dpi: int = 0) -> dict[str, object]:
@@ -452,6 +568,12 @@ def collect_candidates(pdf: Path, output_dir: Path, render_dpi: int = 0) -> dict
         findings.extend(detect_reference_sequence(doc, pdf.name))
         for page_no, page in enumerate(doc, start=1):
             findings.extend(detect_text_rules(pdf.name, page_no, extract_page_text(page)))
+
+        # API review layer (optional, controlled by config.json)
+        api_findings = run_api_review(pdf, artifact_dir)
+        if api_findings:
+            findings.extend(api_findings)
+
         findings = dedupe_findings(findings)
         candidate_path = candidate_dir / f"{pdf.stem}.findings.json"
         candidate_path.write_text(
@@ -634,15 +756,9 @@ def main() -> int:
     args = parser.parse_args()
 
     if args.mode == "auto":
-        print(
-            json.dumps(
-                {
-                    "warning": "auto mode skips human review and may produce low-quality annotations. "
-                    "Use scan + annotate for deep proofreading."
-                },
-                ensure_ascii=False,
-            )
-        )
+        # auto mode now includes local rules + optional API review
+        # Quality depends on config.json: auto_enable_api_review + provider
+        pass
 
     root = args.root.resolve()
     output_dir = resolve_output(root, args.output)

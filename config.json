@@ -1,0 +1,15 @@
+{
+  "_comment": "模型与流程配置；API 密钥仅在项目根 .env 文件",
+  "_comment_provider": "claude | deepseek | doubao | openai | kimi",
+  "provider": "claude",
+  "model_name": "claude-sonnet-4-6",
+  "base_url": "",
+  "temperature": 0.3,
+  "top_p": 1.0,
+  "max_tokens": 4096,
+  "timeout_seconds": 120,
+  "stream": false,
+  "enable_prompt_cache": false,
+  "_comment_auto_mode": "auto 模式下是否启用 API 审读（true=启用；false=仅用本地规则）",
+  "auto_enable_api_review": true
+}
