@@ -346,12 +346,70 @@ def dedupe_findings(findings: list[Finding]) -> list[Finding]:
     return unique
 
 
+def extract_page_text(page: fitz.Page) -> str:
+    """Extract text with dual-column awareness.
+
+    Standard journal PDFs often use two-column body text.
+    PyMuPDF's default get_text('text') usually respects reading order,
+    but we add an explicit columnar fallback for non-standard layouts.
+    """
+    blocks = page.get_text("blocks")
+    if not blocks:
+        return page.get_text("text") or ""
+
+    page_width = page.rect.width
+    mid = page_width / 2
+
+    left: list[tuple] = []
+    right: list[tuple] = []
+    full: list[tuple] = []
+
+    for b in blocks:
+        x0, y0, x1, y1, text, *_ = b
+        if not text.strip() or x1 - x0 < 10:
+            continue
+        if x0 < mid - 40 and x1 > mid + 40:
+            full.append(b)
+        elif x1 <= mid + 40:
+            left.append(b)
+        elif x0 >= mid - 40:
+            right.append(b)
+        else:
+            full.append(b)
+
+    # Dual-column heuristic: substantial text blocks on both sides
+    is_dual = len(left) >= 3 and len(right) >= 3
+    if not is_dual:
+        return page.get_text("text") or ""
+
+    left.sort(key=lambda b: b[1])
+    right.sort(key=lambda b: b[1])
+    full.sort(key=lambda b: b[1])
+
+    # Determine body text vertical range
+    body_top = min(left[0][1] if left else float("inf"), right[0][1] if right else float("inf"))
+    body_bottom = max(left[-1][3] if left else 0, right[-1][3] if right else 0)
+
+    header = [b for b in full if b[3] < body_top]
+    footer = [b for b in full if b[1] > body_bottom]
+    middle = [b for b in full if b not in header and b not in footer]
+
+    parts: list[tuple] = []
+    parts.extend(header)
+    parts.extend(left)
+    parts.extend(middle)
+    parts.extend(right)
+    parts.extend(footer)
+
+    return "\n".join(b[4] for b in parts)
+
+
 def write_text_artifacts(doc: fitz.Document, pdf: Path, artifact_dir: Path) -> None:
     paper_dir = artifact_dir / pdf.stem
     paper_dir.mkdir(parents=True, exist_ok=True)
     chunks = []
     for page_no, page in enumerate(doc, start=1):
-        text = page.get_text("text") or ""
+        text = extract_page_text(page)
         chunks.append(f"===== PAGE {page_no} =====\n{text}\n")
         (paper_dir / f"page_{page_no:03d}.txt").write_text(text, encoding="utf-8")
     (paper_dir / "fulltext.txt").write_text("\n".join(chunks), encoding="utf-8")
@@ -393,7 +451,7 @@ def collect_candidates(pdf: Path, output_dir: Path, render_dpi: int = 0) -> dict
         findings.extend(detect_caption_order(doc, pdf.name))
         findings.extend(detect_reference_sequence(doc, pdf.name))
         for page_no, page in enumerate(doc, start=1):
-            findings.extend(detect_text_rules(pdf.name, page_no, page.get_text("text") or ""))
+            findings.extend(detect_text_rules(pdf.name, page_no, extract_page_text(page)))
         findings = dedupe_findings(findings)
         candidate_path = candidate_dir / f"{pdf.stem}.findings.json"
         candidate_path.write_text(
