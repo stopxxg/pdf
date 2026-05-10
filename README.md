@@ -38,6 +38,9 @@ If you want to run the pipeline directly instead of using the slash command:
 
 # Annotate one PDF after human review
 ./scripts/run_pdf_academic_proofreader.sh /Users/yourname/Desktop/AAA annotate /path/to/reviewed_findings.json
+
+# One-pass auto: scan + rule-based annotate (no AI review)
+./scripts/run_pdf_academic_proofreader.sh /Users/yourname/Desktop/AAA auto
 ```
 
 ## Quality Rules
