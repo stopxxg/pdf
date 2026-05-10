@@ -1,0 +1,7 @@
+__pycache__/
+*.pyc
+*.pyo
+.DS_Store
+*.zip
+.claude/scheduled_tasks.json
+annotated_pdfs/
