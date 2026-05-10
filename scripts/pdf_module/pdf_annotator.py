@@ -29,6 +29,7 @@ class MappedFinding:
     severity: str
     source: str
     fallback_rect: tuple[float, float, float, float] | None = None
+    end_of_doc: bool = False
 
 
 @dataclass
@@ -139,7 +140,20 @@ def map_api_findings(
                     rect = _find_rect(page, paragraph)
 
             if rect is None:
-                missed.append({"issue": issue, "reason": "target_not_found"})
+                # Fallback: append to end-of-document summary page
+                findings.append(
+                    MappedFinding(
+                        file=pdf_path.name,
+                        page=page_no,
+                        target=original,
+                        category=category,
+                        suggestion=suggestion,
+                        severity=severity,
+                        source="api",
+                        fallback_rect=None,
+                        end_of_doc=True,
+                    )
+                )
                 continue
 
             findings.append(

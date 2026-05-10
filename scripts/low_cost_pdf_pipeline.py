@@ -43,6 +43,7 @@ class Finding:
     source: str = "rule"
     occurrence: int = 0
     fallback_rect: tuple[float, float, float, float] | None = None
+    end_of_doc: bool = False
 
 
 def pdfs_under(root: Path, output_dir: Path) -> list[Path]:
@@ -521,6 +522,7 @@ def run_api_review(pdf: Path, artifact_dir: Path) -> list[Finding]:
                 severity=mf.severity,
                 source="api",
                 fallback_rect=mf.fallback_rect,
+                end_of_doc=mf.end_of_doc,
             )
         )
 
@@ -612,6 +614,7 @@ def load_findings(path: Path) -> list[Finding]:
                 source=item.get("source", "reviewed"),
                 occurrence=int(item.get("occurrence", 0)),
                 fallback_rect=tuple(rect) if rect else None,
+                end_of_doc=bool(item.get("end_of_doc", False)),
             )
         )
     return findings
@@ -657,6 +660,42 @@ def count_annotations(doc: fitz.Document) -> dict[str, int]:
     return counts
 
 
+def _add_end_of_doc_summary(doc: fitz.Document, findings: list[Finding]) -> int:
+    """Append a summary page with missed findings that could not be located."""
+    if not findings:
+        return 0
+    page_width = doc[0].rect.width
+    page_height = doc[0].rect.height
+    page = doc.new_page(-1, width=page_width, height=page_height)
+    y = 50
+    count = 0
+
+    title = "未定位批注汇总（以下问题未能在原文中找到精确位置，请手动核查）"
+    page.insert_text((50, y), title, fontsize=14, color=(1, 0, 0), fontname="china-ss")
+    y += 35
+
+    for f in findings:
+        line1 = f"{count + 1}. [{f.category}] 第{f.page}页"
+        line2 = f"   问题：{f.suggestion[:180]}"
+        lines = [line1, line2]
+        block_height = len(lines) * 18 + 8
+        if y + block_height > page_height - 40:
+            page = doc.new_page(-1, width=page_width, height=page_height)
+            y = 50
+        for line in lines:
+            page.insert_text((50, y), line, fontsize=10, color=(0, 0, 0), fontname="china-ss")
+            y += 18
+        rect = fitz.Rect(45, y - block_height + 2, page_width - 45, y)
+        annot = page.add_rect_annot(rect)
+        annot.set_colors(stroke=(1, 0, 0))
+        annot.set_border(width=1.2)
+        annot.set_info(content=f"{f.category}：{f.suggestion}")
+        annot.update()
+        y += 10
+        count += 1
+    return count
+
+
 def annotate_pdf(pdf: Path, output_dir: Path, findings: list[Finding], same_name: bool) -> dict[str, object]:
     result: dict[str, object] = {
         "file": str(pdf),
@@ -679,8 +718,12 @@ def annotate_pdf(pdf: Path, output_dir: Path, findings: list[Finding], same_name
         result["pages"] = doc.page_count
         annotated = 0
         missed: list[dict[str, object]] = []
+        end_doc_findings: list[Finding] = []
         for finding in findings:
             if Path(finding.file).name != pdf.name:
+                continue
+            if finding.end_of_doc:
+                end_doc_findings.append(finding)
                 continue
             if finding.page < 1 or finding.page > doc.page_count:
                 missed.append(asdict(finding) | {"reason": "page out of range"})
@@ -689,6 +732,9 @@ def annotate_pdf(pdf: Path, output_dir: Path, findings: list[Finding], same_name
                 annotated += 1
             else:
                 missed.append(asdict(finding) | {"reason": "target not found"})
+
+        if end_doc_findings:
+            annotated += _add_end_of_doc_summary(doc, end_doc_findings)
 
         output_dir.mkdir(parents=True, exist_ok=True)
         out_name = pdf.name if same_name else f"{pdf.stem}_annotated.pdf"

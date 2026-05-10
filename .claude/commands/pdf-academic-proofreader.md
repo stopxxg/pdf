@@ -14,24 +14,27 @@ Requirements:
 - Output annotated PDFs to `<source-folder>/BBB` with unchanged filenames.
 - Process one PDF at a time.
 - First run low-output candidate scanning with page rendering (PNG artifacts saved to `_artifacts/<stem>/pages/`).
-- Then read the complete extracted text page by page from disk, word by word, and judge sentences one by one.
+- After scan, read the **entire** `fulltext.md` from disk in one go (use up to 2 `Read` calls if it exceeds 2000 lines). Do **not** read in small chunks or ask the user to continue.
+- In parallel, read only the **suspicious page PNGs** identified from text (pages mentioning figures, tables, formulas, or layout anomalies). Do not read all page images at once; read selectively to control cost.
 - Use rendered pages, coordinates, and character-level font checks for p values, superscripts/subscripts, and figure/table order.
-- For visual review, read the rendered page PNGs for pages that contain figures, tables, formulas, or suspicious layout. Do not read all page images at once; read selectively to control cost.
 - Cross-check text extractions against rendered images: if extracted text suggests a subscript error but the image shows a correct visual subscript, do not annotate it.
 - Do not print full extracted text into the chat.
 - Write detailed artifacts and logs to disk, and keep chat output compact.
 - Skip abnormal PDFs safely and continue.
 
 **Auto-review policy:**
-- After scan, do NOT ask the user to confirm before proceeding. Automatically continue to review, compile findings, annotate, and report.
-- The user wants one-shot execution: run scan → AI review → generate reviewed findings JSON → annotate → summarize results, all in one go.
+- After scan, do **NOT** ask the user to confirm before proceeding. Automatically continue to review, compile findings, annotate, and report.
+- The user wants **one-shot execution**: run scan → AI review → generate reviewed findings JSON → annotate → summarize results, all in one go, within a single turn.
 
-Default sequence:
+**One-shot execution sequence:**
 
 1. Run `./scripts/run_pdf_academic_proofreader.sh "$ARGUMENTS" scan`.
    This produces extracted text, candidate JSON, and rendered page PNGs under `_artifacts/`.
-2. Automatically review one paper's candidate JSON and its extracted page text from disk.
-3. Perform systematic editorial review with the following checklist. For every item, inspect the extracted text first; only read the rendered page PNG when text alone is insufficient.
+2. Read `_artifacts/<stem>/fulltext.md` **completely** (up to 2 `Read` calls; merge contents mentally).
+3. Read `_artifacts/<stem>/candidates/*.findings.json` to see local rule candidates.
+4. Identify suspicious pages from the text (mentions of 图/表/公式/占位符/异常排版).
+5. Read those `pages/page_XXX.png` files **in parallel**.
+6. Perform systematic editorial review with the following checklist. For every item, inspect the extracted text first; only read the rendered page PNG when text alone is insufficient.
 
    **Front matter and metadata (page 1)**
    - Chinese title: ≤20 Chinese characters, no subtitle unless necessary.
@@ -84,7 +87,11 @@ Default sequence:
    - English references: check for missing periods after "et al", full-width colons in page numbers, missing [J] markers.
    - Bilingual references: Chinese and English paired and consistent.
 
-4. Compile all findings into the reviewed findings JSON.
-5. Annotate with:
+7. Compile all findings into the reviewed findings JSON and write it to disk.
+8. Annotate with:
    `./scripts/run_pdf_academic_proofreader.sh "$ARGUMENTS" annotate <path-to-reviewed-findings.json>`
-6. Verify annotated output, report summary to user, then continue to the next PDF unless the user asked to stop.
+9. Verify annotated output. Report a concise summary to the user:
+   - Total findings, annotated count, missed count.
+   - List of high-severity issues.
+   - Output path of the annotated PDF.
+10. If more PDFs remain in the folder, loop back to step 1 automatically. Stop only if the user explicitly asks to stop.
