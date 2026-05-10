@@ -5,3 +5,9 @@ __pycache__/
 *.zip
 .claude/scheduled_tasks.json
 annotated_pdfs/
+_artifacts/
+_candidates/
+BBB/
+batch_proofread_log.json
+.env
+.venv/

@@ -23,25 +23,15 @@ Default behavior:
 ## Package Contents
 
 - `CLAUDE.md`: project memory loaded by Claude Code
-- `.claude/commands/pdf-academic-proofreader.md`: slash command entry
-- `scripts/low_cost_pdf_pipeline.py`: fixed low-output pipeline
-- `scripts/run_pdf_academic_proofreader.sh`: shortest terminal entrypoint
-- `references/`: Chinese journal standards and workflow lessons
-
-## Terminal Fallback
-
-If you want to run the pipeline directly instead of using the slash command:
-
-```bash
-# Scan one PDF and write candidates to disk
-./scripts/run_pdf_academic_proofreader.sh /Users/yourname/Desktop/AAA scan
-
-# Annotate one PDF after human review
-./scripts/run_pdf_academic_proofreader.sh /Users/yourname/Desktop/AAA annotate /path/to/reviewed_findings.json
-
-# One-pass auto: scan + rule-based annotate (no AI review)
-./scripts/run_pdf_academic_proofreader.sh /Users/yourname/Desktop/AAA auto
-```
+- `.claude/commands/pdf-academic-proofreader.md`: slash command entry (one-shot scan→review→annotate)
+- `scripts/low_cost_pdf_pipeline.py`: fixed entrypoint (scan mode for extraction/candidates, annotate mode for writing annotations)
+- `scripts/pdf_module/`: supporting modules
+  - `pdf_text_converter.py`: dual-column PDF → Markdown with italic markup
+  - `reference_checker.py`: GB/T 7714 reference format checker
+  - `term_checker.py`: terminology consistency checker
+  - `pdf_annotator.py`: PDF annotation writer
+- `references/`: Chinese journal standards (`chinese-journal-standards.md`), visual checklist (`visual-checklist.md`), journal house style (`journal-house-style-shuibao.md`), and session lessons (`today-lessons.md`)
+- `requirements.txt`: Python dependencies (only PyMuPDF)
 
 ## Quality Rules
 

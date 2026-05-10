@@ -15,7 +15,7 @@ Batch traverse all academic PDF papers in a folder; proofread page by page; chec
 - Always verify suspicious layout comments with rendered page images or coordinates.
 - In batch proofreading, discover all PDFs at once but review them one by one. Do not emit multiple PDFs' full extracted text in one terminal response; long output can be truncated and can hide issues. Save each PDF's full text to its own temporary file and inspect page ranges incrementally.
 - Do not default to conservative batch-only rule scanning. The user's editorial workflow requires deep per-paper proofreading: read each article at full-text human editorial intensity, generate a paper-specific findings list, then write annotations. Automatic rules are supplements only.
-- For true deep proofreading, process only one PDF per run. Finish full-text review, annotated output, verification, and report for that one paper; stop and wait before starting the next paper. Running 10+ PDFs in one pass tends to collapse into rule scanning and loses editorial depth.
+- For true deep proofreading, process one PDF at a time — finish full-text review, annotated output, verification, and report for that paper before moving to the next. The Skill command will auto-loop through remaining PDFs. Running 10+ PDFs in one pass tends to collapse into rule scanning and loses editorial depth.
 
 ## Recommended Implementation Pattern
 

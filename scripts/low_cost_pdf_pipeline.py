@@ -26,7 +26,7 @@ from typing import Any, Iterable, Iterator
 try:
     import fitz  # type: ignore
 except ModuleNotFoundError:
-    tmp_deps = Path("/private/tmp/pdfdeps")
+    tmp_deps = Path(os.environ.get("PDFDEPS_PATH", "/private/tmp/pdfdeps"))
     if tmp_deps.exists():
         sys.path.insert(0, str(tmp_deps))
     import fitz  # type: ignore
@@ -74,7 +74,6 @@ def page_chars(page: fitz.Page) -> Iterator[dict[str, object]]:
                         "font": span.get("font", ""),
                         "flags": span.get("flags", 0),
                         "size": span.get("size", 0),
-                        "line_bbox": line_bbox,
                     }
 
 
@@ -87,12 +86,14 @@ def _italic_flag() -> int:
 
 def is_italic(char: dict[str, object]) -> bool:
     font = str(char.get("font", "")).lower()
-    flags = int(char.get("flags", 0) or 0)
+    flags = int(char.get("flags", 0))
     return bool(flags & _italic_flag()) or "italic" in font or "oblique" in font
 
 
 def union_rect(rects: Iterable[fitz.Rect]) -> fitz.Rect:
     items = list(rects)
+    if not items:
+        return fitz.Rect(0, 0, 0, 0)
     rect = fitz.Rect(items[0])
     for item in items[1:]:
         rect |= fitz.Rect(item)
@@ -133,56 +134,145 @@ def add_text_finding(
     )
 
 
-def detect_p_value_style(doc: fitz.Document, filename: str) -> list[Finding]:
+def _add_regex_findings(
+    findings: list[Finding],
+    filename: str,
+    page_no: int,
+    text: str,
+    patterns: list[tuple[str, str, str]],
+) -> None:
+    """Add findings for regex-based text rules."""
+    for regex, category, suggestion in patterns:
+        occurrence = 0
+        for match in re.finditer(regex, text):
+            add_text_finding(
+                findings,
+                filename,
+                page_no,
+                match.group(),
+                category,
+                suggestion,
+                occurrence=occurrence,
+            )
+            occurrence += 1
+
+
+def detect_stat_symbol_style(doc: fitz.Document, filename: str) -> list[Finding]:
     findings: list[Finding] = []
-    # Match p/P followed by optional space, comparator, optional space, and number.
-    # Covers p<0.05, P > 0.01, p=0.001, p≤0.05, etc.
-    p_regex = re.compile(r"[pP]\s*(?:[<=>≤≥])\s*(?:0?\.\d+|\d+)")
+    # Patterns for common statistical expressions
+    stat_patterns = [
+        (re.compile(r"[pP]\s*(?:[<=>≤≥])\s*(?:0?\.\d+|\d+)"), "p", "p值中的p"),
+        (re.compile(r"[I]\d+"), "I", "Moran's I中的I"),
+        (re.compile(r"[R]\d+|R²"), "R", "相关系数R"),
+        (re.compile(r"[F]\s*\(|F\d+"), "F", "F统计量"),
+        (re.compile(r"[tzq]\s*(?:=|<|>|≥|≤|\()"), "tzq", "统计符号"),
+    ]
     for page_no, page in enumerate(doc, start=1):
         chars = list(page_chars(page))
         text = "".join(str(ch["c"]) for ch in chars)
-        for match in p_regex.finditer(text):
-            start, end = match.start(), match.end()
-            run = chars[start:end]
-            if not run:
-                continue
-            p_char = run[0]
-            rect = char_rect(run)
-            ys = [float(ch["bbox"][1]) for ch in run]  # type: ignore[index]
-            size = float(p_char.get("size", 0) or 0)
-            if p_char["c"] in "pP" and not is_italic(p_char):
-                findings.append(
-                    Finding(
-                        filename,
-                        page_no,
-                        f"auto:p-style:{page_no}:{start}",
-                        "公式/统计符号正斜体",
-                        "字符级字体检查显示，此处p值中的p为正体。建议将p排为斜体。",
-                        severity="high",
-                        source="char-font",
-                        fallback_rect=rect,
+        for regex, symbol_label, desc in stat_patterns:
+            for match in regex.finditer(text):
+                start, end = match.start(), match.end()
+                run = chars[start:end]
+                if not run:
+                    continue
+                symbol_char = run[0]
+                rect = char_rect(run)
+                ys = [float(ch["bbox"][1]) for ch in run]  # type: ignore[index]
+                size = float(symbol_char.get("size", 0) or 0)
+                if not is_italic(symbol_char):
+                    findings.append(
+                        Finding(
+                            filename,
+                            page_no,
+                            f"auto:stat-style:{symbol_label}:{page_no}:{start}",
+                            "公式/统计符号正斜体",
+                            f"字符级字体检查显示，此处{desc}为正体。建议排为斜体。",
+                            severity="medium",
+                            source="char-font",
+                            fallback_rect=rect,
+                        )
                     )
-                )
-            if max(ys) - min(ys) > max(3.0, size * 0.6):
-                findings.append(
-                    Finding(
-                        filename,
-                        page_no,
-                        f"auto:p-linebreak:{page_no}:{start}",
-                        "公式/统计表达断行",
-                        "字符级位置检查显示，统计表达被拆成跨行显示。建议避免在统计表达内部断行。",
-                        severity="medium",
-                        source="char-position",
-                        fallback_rect=rect,
+                if max(ys) - min(ys) > max(3.0, size * 0.6):
+                    findings.append(
+                        Finding(
+                            filename,
+                            page_no,
+                            f"auto:stat-linebreak:{symbol_label}:{page_no}:{start}",
+                            "公式/统计表达断行",
+                            "字符级位置检查显示，统计表达被拆成跨行显示。建议避免在统计表达内部断行。",
+                            severity="medium",
+                            source="char-position",
+                            fallback_rect=rect,
+                        )
                     )
-                )
+    return findings
+
+
+def detect_script_style(doc: fitz.Document, filename: str) -> list[Finding]:
+    """Detect missing subscripts for common variable+digit patterns (e.g., I30, T1)."""
+    findings: list[Finding] = []
+    # Common variable letters that frequently carry numeric subscripts in scientific papers
+    subscript_prefixes = set("ITRPXYZWVSDHCKMNpxyzwvsdhckmn")
+    for page_no, page in enumerate(doc, start=1):
+        chars = list(page_chars(page))
+        i = 0
+        while i < len(chars) - 1:
+            ch = chars[i]
+            if ch["c"].isalpha() and ch["c"] in subscript_prefixes and is_italic(ch):
+                letter_rect = fitz.Rect(ch["bbox"])
+                letter_size = float(ch.get("size", 0) or 0)
+                if letter_size <= 0:
+                    i += 1
+                    continue
+                # Collect consecutive digits immediately following the letter
+                j = i + 1
+                digits: list[dict[str, object]] = []
+                while j < len(chars) and chars[j]["c"].isdigit():
+                    # Ensure digit is on roughly the same line
+                    dy = abs(float(chars[j]["bbox"][1]) - float(ch["bbox"][1]))
+                    if dy > letter_size * 0.8:
+                        break
+                    digits.append(chars[j])
+                    j += 1
+                if 1 <= len(digits) <= 3:
+                    digit_rects = [fitz.Rect(d["bbox"]) for d in digits]
+                    combined_digit_rect = union_rect(digit_rects)
+                    digit_size = max(float(d.get("size", 0) or 0) for d in digits)
+                    letter_center_y = (letter_rect.y0 + letter_rect.y1) / 2
+                    digit_center_y = (combined_digit_rect.y0 + combined_digit_rect.y1) / 2
+                    # Subscript heuristic: digit is lower (larger y) and smaller than the letter
+                    is_sub = (
+                        digit_center_y > letter_center_y + letter_size * 0.05
+                        and digit_size < letter_size * 0.9
+                    )
+                    if not is_sub:
+                        # Guard against large gaps (e.g., across words)
+                        gap = digit_rects[0].x0 - letter_rect.x1
+                        if gap < letter_size * 1.5:
+                            target_text = ch["c"] + "".join(d["c"] for d in digits)
+                            findings.append(
+                                Finding(
+                                    filename,
+                                    page_no,
+                                    f"auto:subscript:{page_no}:{i}",
+                                    "公式/下标格式",
+                                    f"字符级位置检查显示，{target_text} 中的数字未显示为下标。建议将数字改为下标格式。",
+                                    severity="medium",
+                                    source="char-position",
+                                    fallback_rect=(combined_digit_rect.x0, combined_digit_rect.y0, combined_digit_rect.x1, combined_digit_rect.y1),
+                                )
+                            )
+                i = j
+            else:
+                i += 1
     return findings
 
 
 def detect_text_rules(filename: str, page_no: int, text: str) -> list[Finding]:
     findings: list[Finding] = []
-    front = text[:2400]
     if page_no == 1:
+        front = text[:2400]
         if re.search(r"文献标识码：\s*(?:文章编号|中图分类号|\n)", front):
             add_text_finding(
                 findings,
@@ -209,14 +299,15 @@ def detect_text_rules(filename: str, page_no: int, text: str) -> list[Finding]:
         ("http：", "文字/标点", "URL存在全角冒号，可能导致链接失效。建议改为半角“http://”或“https://”。"),
         ("https：", "文字/标点", "URL存在全角冒号，可能导致链接失效。建议改为半角“https://”。"),
         ("∥", "文字/标点", "URL中疑似使用了异常双斜线符号。建议改为半角“//”。"),
-        ("0. 05", "文字/标点", "显著性水平数字中存在多余空格。建议改为“0.05”。"),
-        ("0. 01", "文字/标点", "显著性水平数字中存在多余空格。建议改为“0.01”。"),
+        ("0. 001", "文字/标点", "数值“0. 001”中存在多余空格。建议改为“0.001”。"),
         ("，。", "文字/标点", "连续出现逗号和句号。建议删除多余标点。"),
         ("。。", "文字/标点", "连续出现两个句号。建议删除多余标点。"),
         ("..", "文字/标点", "连续出现两个英文句点。建议核查DOI、URL或参考文献标点。"),
+        ("、、", "文字/标点", "连续出现两个顿号。建议删除多余顿号。"),
         ("本研仍", "文字/标点", "“本研”疑为“本研究”。建议补全。"),
         ("波段性", "文字/标点", "“波段性”在趋势描述中疑为“波动性”。建议核改。"),
         ("与和", "文字/标点", "“与和”连用不当。建议删除多余连接词。"),
+        ("摘 要", "文字/标点", "“摘 要”中间有多余空格，应改为“摘要”。"),
     ]
     for target, category, suggestion in text_targets:
         occurrence = 0
@@ -231,18 +322,16 @@ def detect_text_rules(filename: str, page_no: int, text: str) -> list[Finding]:
             occurrence += 1
             start = hit + len(target)
 
-    occurrence = 0
-    for match in re.finditer(r"[pP]\s*<\s*0\.\s+0[15]", text):
-        add_text_finding(
-            findings,
-            filename,
-            page_no,
-            match.group(),
-            "公式/统计表达",
-            "p值表达存在多余空格或断裂风险。建议统一为紧凑形式，并核查p是否斜体。",
-            occurrence=occurrence,
-        )
-        occurrence += 1
+    # Regex-based text rules
+    _add_regex_findings(findings, filename, page_no, text, [
+        (r"[pP]\s*<\s*0\.\s+0[15]", "公式/统计表达", "p值表达存在多余空格或断裂风险。建议统一为紧凑形式，并核查p是否斜体。"),
+        (r"0\.\s+\d+", "文字/标点", "小数点后存在多余空格，建议删除空格。"),
+        (r"图\s+\d+", "文字/标点", "“图”与编号之间存在多余空格，建议改为“图1”格式。"),
+        (r"表\s+\d+", "文字/标点", "“表”与编号之间存在多余空格，建议改为“表1”格式。"),
+        (r"et al\.[A-Z]", "文字/标点", "“et al.”后缺少空格，建议改为“et al. Author”。"),
+        (r"[a-zA-Z]，[a-zA-Z]", "文字/标点", "英文文本中使用了全角逗号，建议改为半角逗号。"),
+        (r"[a-zA-Z]。[a-zA-Z]", "文字/标点", "英文文本中使用了全角句号，建议改为半角句点。"),
+    ])
 
     lines = [line.strip() for line in text.splitlines() if compact(line)]
     for i in range(len(lines) - 1):
@@ -304,11 +393,18 @@ def detect_caption_order(doc: fitz.Document, filename: str) -> list[Finding]:
 
 def detect_reference_sequence(doc: fitz.Document, filename: str) -> list[Finding]:
     refs: list[tuple[int, int, str]] = []
+    in_ref_section = False
     for page_no, page in enumerate(doc, start=1):
         for line in (page.get_text("text") or "").splitlines():
-            match = re.match(r"^［([0-9]+)］", line.strip())
+            stripped = line.strip()
+            if re.match(r"^参考文献\s*$", stripped):
+                in_ref_section = True
+                continue
+            if not in_ref_section:
+                continue
+            match = re.match(r"^［([0-9]+)］", stripped)
             if match:
-                refs.append((int(match.group(1)), page_no, line.strip()))
+                refs.append((int(match.group(1)), page_no, stripped))
     if len(refs) < 2:
         return []
     nums = [item[0] for item in refs]
@@ -335,11 +431,48 @@ def detect_reference_sequence(doc: fitz.Document, filename: str) -> list[Finding
     ]
 
 
+def detect_figure_table_citation_order(doc: fitz.Document, filename: str) -> list[Finding]:
+    """Detect missing figure/table numbers in first in-text citations."""
+    findings: list[Finding] = []
+    for prefix, label in [("图", "图"), ("表", "表")]:
+        cites: list[tuple[int, int]] = []
+        for page_no, page in enumerate(doc, start=1):
+            text = page.get_text("text") or ""
+            for match in re.finditer(rf"{prefix}\s*([0-9]+)", text):
+                num = int(match.group(1))
+                cites.append((page_no, num))
+        if len(cites) < 2:
+            continue
+        seen: set[int] = set()
+        first_cites: list[tuple[int, int]] = []
+        for page_no, num in cites:
+            if num not in seen:
+                seen.add(num)
+                first_cites.append((page_no, num))
+        if len(first_cites) >= 2:
+            nums = [n for _, n in first_cites]
+            expected = list(range(min(nums), max(nums) + 1))
+            missing = [n for n in expected if n not in nums]
+            if missing:
+                findings.append(
+                    Finding(
+                        filename,
+                        first_cites[0][0],
+                        f"auto:{label}-citation-order",
+                        f"{label}序/版式",
+                        f"正文首次引用的{label}编号不连续，缺少{label}{missing}。建议核查{label}顺序与正文引用是否一致。",
+                        severity="medium",
+                        source="text-rule",
+                    )
+                )
+    return findings
+
+
 def dedupe_findings(findings: list[Finding]) -> list[Finding]:
     seen: set[tuple[object, ...]] = set()
     unique: list[Finding] = []
     for item in findings:
-        key = (item.file, item.page, item.target, item.category, item.occurrence, item.fallback_rect)
+        key = (item.file, item.page, item.target, item.category, item.occurrence, item.fallback_rect, item.source)
         if key in seen:
             continue
         seen.add(key)
@@ -446,93 +579,6 @@ def write_text_artifacts(doc: fitz.Document, pdf: Path, artifact_dir: Path) -> N
         pass
 
 
-def run_api_review(pdf: Path, artifact_dir: Path) -> list[Finding]:
-    """Run API review on a PDF and return findings with precise coordinates."""
-    try:
-        from pdf_module.pdf_ai_client import ModelConfig, review_markdown, _resolve_api_key, _resolve_base_url, _resolve_model_name
-        from pdf_module.pdf_annotator import map_api_findings
-    except Exception:
-        return []
-
-    project_root = Path(__file__).resolve().parent.parent
-    config_path = project_root / "config.json"
-    prompt_path = project_root / "prompt.json"
-
-    if not config_path.exists():
-        return []
-
-    try:
-        cfg = json.loads(config_path.read_text(encoding="utf-8"))
-    except Exception:
-        return []
-
-    if not cfg.get("auto_enable_api_review", False):
-        return []
-
-    provider = str(cfg.get("provider", "doubao")).strip().lower()
-    try:
-        api_key = _resolve_api_key(provider)
-    except Exception:
-        return []
-
-    base_url = _resolve_base_url(provider, str(cfg.get("base_url", "")))
-    model_name = _resolve_model_name(provider, str(cfg.get("model_name", "")))
-
-    model_cfg = ModelConfig(
-        provider=provider,
-        model_name=model_name,
-        base_url=base_url,
-        api_key=api_key,
-        temperature=float(cfg.get("temperature", 0.3)),
-        top_p=float(cfg.get("top_p", 1.0)),
-        max_tokens=int(cfg.get("max_tokens", 4096)),
-        timeout=int(cfg.get("timeout_seconds", 120)),
-        stream=bool(cfg.get("stream", False)),
-        enable_prompt_cache=bool(cfg.get("enable_prompt_cache", False)),
-    )
-
-    prompt = ""
-    if prompt_path.exists():
-        try:
-            p = json.loads(prompt_path.read_text(encoding="utf-8"))
-            prompt = str(p.get("full_doc_prompt", ""))
-        except Exception:
-            pass
-
-    md_path = artifact_dir / pdf.stem / "fulltext.md"
-    if not md_path.exists():
-        return []
-
-    md_text = md_path.read_text(encoding="utf-8")
-    result = review_markdown(md_text, model_cfg, prompt=prompt)
-
-    if not result.issues:
-        return []
-
-    mapped = map_api_findings(pdf, result.issues)
-    findings: list[Finding] = []
-    for mf in mapped.findings:
-        findings.append(
-            Finding(
-                file=mf.file,
-                page=mf.page,
-                target=mf.target,
-                category=mf.category,
-                suggestion=mf.suggestion,
-                severity=mf.severity,
-                source="api",
-                fallback_rect=mf.fallback_rect,
-                end_of_doc=mf.end_of_doc,
-            )
-        )
-
-    if mapped.missed:
-        missed_path = artifact_dir / pdf.stem / "api_missed.json"
-        missed_path.write_text(json.dumps(mapped.missed, ensure_ascii=False, indent=2), encoding="utf-8")
-
-    return findings
-
-
 def collect_candidates(pdf: Path, output_dir: Path, render_dpi: int = 0) -> dict[str, object]:
     artifact_dir = output_dir / "_artifacts"
     candidate_dir = output_dir / "_candidates"
@@ -565,16 +611,13 @@ def collect_candidates(pdf: Path, output_dir: Path, render_dpi: int = 0) -> dict
                 pix.save(image_dir / f"page_{page_no:03d}.png")
 
         findings: list[Finding] = []
-        findings.extend(detect_p_value_style(doc, pdf.name))
+        findings.extend(detect_stat_symbol_style(doc, pdf.name))
+        findings.extend(detect_script_style(doc, pdf.name))
         findings.extend(detect_caption_order(doc, pdf.name))
         findings.extend(detect_reference_sequence(doc, pdf.name))
+        findings.extend(detect_figure_table_citation_order(doc, pdf.name))
         for page_no, page in enumerate(doc, start=1):
             findings.extend(detect_text_rules(pdf.name, page_no, extract_page_text(page)))
-
-        # API review layer (optional, controlled by config.json)
-        api_findings = run_api_review(pdf, artifact_dir)
-        if api_findings:
-            findings.extend(api_findings)
 
         findings = dedupe_findings(findings)
         candidate_path = candidate_dir / f"{pdf.stem}.findings.json"
@@ -620,19 +663,74 @@ def load_findings(path: Path) -> list[Finding]:
     return findings
 
 
+_HALF_WIDTH_TRANS = str.maketrans({
+    "，": ",", "。": ".", "：": ":", "；": ";",
+    "（": "(", "）": ")", "［": "[", "］": "]",
+    "【": "[", "】": "]", "、": ",", "！": "!",
+    "？": "?", "“": '"', "”": '"', "‘": "'", "’": "'",
+    "′": "'", "″": '"', "—": "-", "–": "-",
+})
+
+
+def _to_halfwidth(s: str) -> str:
+    """Convert common full-width punctuation to half-width for search fallback."""
+    return s.translate(_HALF_WIDTH_TRANS)
+
+
+def _extract_search_keys(target: str) -> list[str]:
+    """Extract high-discriminability short phrases from a target for search fallback."""
+    if target.startswith("auto:"):
+        target = target.split(":", 2)[-1] if target.count(":") >= 2 else target
+    keys: list[str] = []
+    if len(target) <= 30:
+        keys.append(target)
+    # Core text without surrounding punctuation
+    core = target.strip("（）()[]［］\"'\"'")
+    if core and core != target and len(core) <= 30:
+        keys.append(core)
+    # Split by punctuation/spaces and take longest meaningful fragments
+    parts = re.split(r"[，。：；、！？\s\(\)\[\]（）［］]", target)
+    for p in sorted(parts, key=len, reverse=True):
+        if len(p) >= 4 and p not in keys:
+            keys.append(p)
+            if len(keys) >= 5:
+                break
+    # For Chinese targets, also add head and tail slices
+    if len(target) > 6:
+        keys.append(target[:8])
+        keys.append(target[-8:])
+    return keys[:5]
+
+
 def find_rect(page: fitz.Page, finding: Finding) -> fitz.Rect | None:
     if finding.target.startswith("auto:") and finding.fallback_rect:
         return fitz.Rect(finding.fallback_rect)
-    variants = [
-        finding.target,
-        finding.target.replace("\n", " "),
-        finding.target.replace("\n", ""),
-        " ".join(finding.target.split()),
+    base = finding.target
+    variants: list[str] = [
+        base,
+        base.replace("\n", " "),
+        base.replace("\n", ""),
+        " ".join(base.split()),
+        _to_halfwidth(base),
+        _to_halfwidth(base.replace("\n", " ")),
+        _to_halfwidth(" ".join(base.split())),
     ]
     for query in variants:
+        if not query:
+            continue
         rects = page.search_for(query, quads=False)
         if rects:
             return fitz.Rect(rects[min(finding.occurrence, len(rects) - 1)])
+
+    # Fallback: search for distinctive key phrases extracted from long targets
+    keys = _extract_search_keys(base)
+    for key in keys:
+        if not key or len(key) < 3:
+            continue
+        rects = page.search_for(key, quads=False)
+        if rects:
+            return fitz.Rect(rects[min(finding.occurrence, len(rects) - 1)])
+
     if finding.fallback_rect:
         return fitz.Rect(finding.fallback_rect)
     return None
@@ -660,6 +758,19 @@ def count_annotations(doc: fitz.Document) -> dict[str, int]:
     return counts
 
 
+_CJK_FONTS = ("china-ss", "hebo", "cjk", "helv")
+
+
+def _insert_cjk_text(page: fitz.Page, point: tuple[float, float], text: str, **kwargs) -> None:
+    """Insert text with CJK font fallback."""
+    for font in _CJK_FONTS:
+        try:
+            page.insert_text(point, text, fontname=font, **kwargs)
+            return
+        except Exception:
+            continue
+
+
 def _add_end_of_doc_summary(doc: fitz.Document, findings: list[Finding]) -> int:
     """Append a summary page with missed findings that could not be located."""
     if not findings:
@@ -671,7 +782,7 @@ def _add_end_of_doc_summary(doc: fitz.Document, findings: list[Finding]) -> int:
     count = 0
 
     title = "未定位批注汇总（以下问题未能在原文中找到精确位置，请手动核查）"
-    page.insert_text((50, y), title, fontsize=14, color=(1, 0, 0), fontname="china-ss")
+    _insert_cjk_text(page, (50, y), title, fontsize=14, color=(1, 0, 0))
     y += 35
 
     for f in findings:
@@ -683,9 +794,9 @@ def _add_end_of_doc_summary(doc: fitz.Document, findings: list[Finding]) -> int:
             page = doc.new_page(-1, width=page_width, height=page_height)
             y = 50
         for line in lines:
-            page.insert_text((50, y), line, fontsize=10, color=(0, 0, 0), fontname="china-ss")
+            _insert_cjk_text(page, (50, y), line, fontsize=10, color=(0, 0, 0))
             y += 18
-        rect = fitz.Rect(45, y - block_height + 2, page_width - 45, y)
+        rect = fitz.Rect(45, max(0, y - block_height + 2), page_width - 45, y)
         annot = page.add_rect_annot(rect)
         annot.set_colors(stroke=(1, 0, 0))
         annot.set_border(width=1.2)
@@ -725,13 +836,21 @@ def annotate_pdf(pdf: Path, output_dir: Path, findings: list[Finding], same_name
             if finding.end_of_doc:
                 end_doc_findings.append(finding)
                 continue
-            if finding.page < 1 or finding.page > doc.page_count:
-                missed.append(asdict(finding) | {"reason": "page out of range"})
-                continue
-            if add_annotation(doc[finding.page - 1], finding):
+
+            annotated_success = False
+            for attempt_page in (finding.page, finding.page - 1, finding.page + 1):
+                if 1 <= attempt_page <= doc.page_count:
+                    if add_annotation(doc[attempt_page - 1], finding):
+                        annotated_success = True
+                        break
+
+            if annotated_success:
                 annotated += 1
             else:
-                missed.append(asdict(finding) | {"reason": "target not found"})
+                if finding.page < 1 or finding.page > doc.page_count:
+                    missed.append(asdict(finding) | {"reason": "page out of range"})
+                else:
+                    missed.append(asdict(finding) | {"reason": "target not found"})
 
         if end_doc_findings:
             annotated += _add_end_of_doc_summary(doc, end_doc_findings)
@@ -793,18 +912,13 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--root", type=Path, required=True, help="Folder containing source PDFs.")
     parser.add_argument("--output", type=Path, help="Output folder. Defaults to ROOT/annotated_pdfs.")
-    parser.add_argument("--mode", choices=["scan", "annotate", "auto"], default="scan")
+    parser.add_argument("--mode", choices=["scan", "annotate"], default="scan")
     parser.add_argument("--findings-json", type=Path, help="Reviewed findings JSON for annotate mode.")
     parser.add_argument("--same-name", action="store_true", help="Keep output PDF filenames unchanged.")
     parser.add_argument("--limit", type=int, default=0, help="Maximum PDFs to process; 0 means all.")
     parser.add_argument("--render-dpi", type=int, default=144, help="DPI for page PNG rendering during scan. 0 disables rendering.")
     parser.add_argument("--verbose", action="store_true", help="Print full JSON results instead of compact summary.")
     args = parser.parse_args()
-
-    if args.mode == "auto":
-        # auto mode now includes local rules + optional API review
-        # Quality depends on config.json: auto_enable_api_review + provider
-        pass
 
     root = args.root.resolve()
     output_dir = resolve_output(root, args.output)
@@ -813,21 +927,15 @@ def main() -> int:
         pdfs = pdfs[: args.limit]
 
     results: list[dict[str, object]] = []
-    if args.mode in {"scan", "auto"}:
+    if args.mode == "scan":
         for pdf in pdfs:
             item = collect_candidates(pdf, output_dir, render_dpi=args.render_dpi)
             results.append(item)
             print(json.dumps({"phase": "scan", "file": pdf.name, "status": item["status"], "candidates": item.get("candidate_count", 0)}, ensure_ascii=False))
 
-    if args.mode in {"annotate", "auto"}:
+    if args.mode == "annotate":
         if args.findings_json:
             findings = load_findings(args.findings_json)
-        elif args.mode == "auto":
-            findings = []
-            for item in results:
-                candidate = item.get("candidate_json")
-                if candidate:
-                    findings.extend(load_findings(Path(str(candidate))))
         else:
             raise SystemExit("--findings-json is required in annotate mode")
 

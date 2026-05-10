@@ -5,7 +5,6 @@ This project packages a Chinese science journal PDF proofreading workflow for Cl
 ## Quick Start
 
 - Preferred entrypoint in Claude Code: `/pdf-academic-proofreader <PDF_FOLDER>`
-- Terminal fallback: `./scripts/run_pdf_academic_proofreader.sh <PDF_FOLDER>`
 - Default output folder: `<PDF_FOLDER>/BBB`
 - Default filename policy: keep source filenames unchanged
 
@@ -19,7 +18,6 @@ This project packages a Chinese science journal PDF proofreading workflow for Cl
 ## Default Execution Entry
 
 - Always use `./scripts/low_cost_pdf_pipeline.py` as the fixed script entrypoint before creating any one-off script.
-- Prefer the wrapper `./scripts/run_pdf_academic_proofreader.sh` for terminal launches because it already applies the standard folder, output, and filename defaults.
 - Default output folder for this workflow is `<PDF_FOLDER>/BBB`.
 - Keep output filenames unchanged unless the user explicitly asks otherwise.
 - Process one PDF at a time, checkpoint the log, then continue to the next PDF automatically unless the user asks to stop.
@@ -49,3 +47,5 @@ This project packages a Chinese science journal PDF proofreading workflow for Cl
 
 - @references/chinese-journal-standards.md
 - @references/today-lessons.md
+- @references/visual-checklist.md
+- @references/journal-house-style-shuibao.md

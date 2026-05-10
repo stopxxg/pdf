@@ -14,8 +14,10 @@ from typing import Any
 try:
     import fitz  # type: ignore
 except ModuleNotFoundError:  # pragma: no cover
-    import sys
-    sys.path.insert(0, str(Path("/private/tmp/pdfdeps")))
+    import sys, os
+    deps = Path(os.environ.get("PDFDEPS_PATH", "/private/tmp/pdfdeps"))
+    if deps.exists():
+        sys.path.insert(0, str(deps))
     import fitz  # type: ignore
 
 

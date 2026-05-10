@@ -14,8 +14,10 @@ from typing import Iterator
 try:
     import fitz  # type: ignore
 except ModuleNotFoundError:  # pragma: no cover
-    import sys
-    sys.path.insert(0, str(Path("/private/tmp/pdfdeps")))
+    import sys, os
+    deps = Path(os.environ.get("PDFDEPS_PATH", "/private/tmp/pdfdeps"))
+    if deps.exists():
+        sys.path.insert(0, str(deps))
     import fitz  # type: ignore
 
 
@@ -132,7 +134,9 @@ def _page_to_markdown(page: fitz.Page, page_no: int, apply_markup: bool = True) 
             if txt.strip():
                 line_texts.append(txt)
         if line_texts:
-            paragraph = " ".join(line_texts)
+            # Join lines inside the same block with newlines so AI can see
+            # original line boundaries; separate blocks with blank lines.
+            paragraph = "\n".join(line_texts)
             blocks.append((bbox[0], bbox[1], bbox[2], bbox[3], paragraph))
 
     sorted_blocks = _sort_dual_column(blocks, page.rect)
