@@ -91,9 +91,8 @@ def _find_variants(full_text: str, terms: set[str]) -> list[tuple[str, str, int]
     return variants
 
 
-def check_terms(doc: fitz.Document, filename: str) -> list[TermIssue]:
-    """Run terminology consistency check."""
-    full_text = "\n".join(page.get_text("text") or "" for page in doc)
+def check_terms_text(full_text: str, filename: str) -> list[TermIssue]:
+    """Run terminology consistency check on plain text."""
     title, abstract, keywords = _extract_title_abstract_keywords(full_text)
 
     front_text = title + " " + abstract + " " + keywords
@@ -120,6 +119,12 @@ def check_terms(doc: fitz.Document, filename: str) -> list[TermIssue]:
     return issues
 
 
+def check_terms(doc: fitz.Document, filename: str) -> list[TermIssue]:
+    """Run terminology consistency check on a PDF document."""
+    full_text = "\n".join(page.get_text("text") or "" for page in doc)
+    return check_terms_text(full_text, filename)
+
+
 def to_findings(issues: list[TermIssue], filename: str) -> list[dict[str, Any]]:
     return [
         {
@@ -142,7 +147,23 @@ if __name__ == "__main__":
     import json, sys
     if len(sys.argv) < 2:
         print("Usage: python term_checker.py <pdf_path>", file=sys.stderr)
+        print("       python term_checker.py --text <fulltext_path> <filename>", file=sys.stderr)
         sys.exit(1)
+
+    if sys.argv[1] == "--text":
+        if len(sys.argv) < 4:
+            print("Usage: python term_checker.py --text <fulltext_path> <filename>", file=sys.stderr)
+            sys.exit(1)
+        text_path = Path(sys.argv[2])
+        filename = sys.argv[3]
+        if not text_path.exists():
+            print(f"Error: file not found: {text_path}", file=sys.stderr)
+            sys.exit(1)
+        full_text = text_path.read_text(encoding="utf-8")
+        issues = check_terms_text(full_text, filename)
+        print(json.dumps(to_findings(issues, filename), ensure_ascii=False, indent=2))
+        sys.exit(0)
+
     path = Path(sys.argv[1])
     if not path.exists():
         print(f"Error: file not found: {path}", file=sys.stderr)

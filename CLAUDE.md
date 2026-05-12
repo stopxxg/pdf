@@ -1,34 +1,36 @@
-# PDF Academic Proofreader for Claude Code
+# PDF/Word Academic Proofreader for Claude Code
 
-This project packages a Chinese science journal PDF proofreading workflow for Claude Code.
+This project packages a Chinese science journal proofreading workflow for Claude Code, supporting both PDF and Word (.docx) submissions.
 
 ## Quick Start
 
-- Preferred entrypoint in Claude Code: `/pdf-academic-proofreader <PDF_FOLDER>`
-- Default output folder: `<PDF_FOLDER>/BBB`
+- Preferred entrypoint in Claude Code: `/pdf-academic-proofreader <FOLDER>`
+- Default output folder: `<FOLDER>/BBB`
 - Default filename policy: keep source filenames unchanged
+- The skill auto-detects file type (`.pdf` or `.docx`) and routes to the appropriate pipeline.
 
 ## Core Policy
 
-- Default mode is low-cost deep editorial proofreading with full-text human editorial intensity.
-- Cost control may reduce repeated context, terminal output, temporary scripts, permission reviews, and mechanical work, but it must never reduce editorial quality.
-- Each paper must still be read in full, word by word, with sentence-by-sentence judgment for typos, missing words, grammar, punctuation, logic, terminology, references, formulas, and layout before final annotated PDFs are delivered.
+- Default mode is **high-precision deep editorial proofreading** with full-text human editorial intensity.
+- Each paper must be read in full, word by word, with sentence-by-sentence judgment for typos, missing words, grammar, punctuation, logic, terminology, references, formulas, and layout before final annotated files are delivered.
 - Do not rely on candidate scanning alone as the final review.
+- Accuracy is the top priority. Use deterministic checks as supplements, not replacements, for editorial judgment.
 
 ## Default Execution Entry
 
-- Always use `./scripts/low_cost_pdf_pipeline.py` as the fixed script entrypoint before creating any one-off script.
-- Default output folder for this workflow is `<PDF_FOLDER>/BBB`.
+- For **PDFs**: always use `./scripts/pdf_pipeline.py` as the fixed script entrypoint.
+- For **Word documents**: always use `./scripts/word_pipeline.py` as the fixed script entrypoint.
+- Default output folder for both workflows is `<SOURCE_FOLDER>/BBB`.
 - Keep output filenames unchanged unless the user explicitly asks otherwise.
-- Process one PDF at a time, checkpoint the log, then continue to the next PDF automatically unless the user asks to stop.
+- Process one file at a time, checkpoint the log, then continue to the next file automatically unless the user asks to stop.
 
 ## Default Model Policy
 
-- Use `Claude 5.4`-level equivalent as the default model for full-text proofreading when available in Claude Code.
+- Use the strongest available model for full-text proofreading.
 - Reserve stronger models for small-page escalation passes, borderline language judgments, or final spot checks.
 - Do not downgrade the final full-text proofreading pass to a lightweight model.
 
-## Cost-Control Rules
+## Efficiency Guidelines
 
 - Do not print full extracted PDF text into the chat unless the user explicitly requests it.
 - Read extracted text from disk in small page ranges.
@@ -38,10 +40,16 @@ This project packages a Chinese science journal PDF proofreading workflow for Cl
 
 ## Accuracy Rules
 
+### PDF-specific
 - For `p<0.05`, use font and character-level evidence. Do not judge upright/italic from plain extracted text alone.
 - For superscripts and subscripts, inspect character size and baseline position. Do not mark a correct visual subscript wrong because extraction flattened it.
 - For figure and table order, use rendered pages or coordinate checks, not object extraction order.
-- If uncertain, annotate conservatively with “建议核查”.
+- If uncertain, annotate conservatively with "建议核查".
+
+### Word-specific
+- For `p<0.05`, rely on OOXML italic markup (`<i>`) from `fulltext.md`. Word run properties are usually accurate.
+- For superscripts and subscripts, rely on OOXML `<sub>` / `<sup>` markup.
+- Chart and table layout checks (three-line table, figure resolution, watermark) are deferred to the PDF stage; flag only textual issues in Word.
 
 ## References
 

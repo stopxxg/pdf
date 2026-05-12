@@ -192,10 +192,8 @@ def _check_ref_format(ref_no: int, text: str) -> list[RefIssue]:
     return issues
 
 
-def check_references(doc: fitz.Document, filename: str) -> list[RefIssue]:
-    """Run full reference check on a document."""
-    full_text = "\n".join(page.get_text("text") or "" for page in doc)
-
+def check_references_text(full_text: str, filename: str, last_page: int = 1) -> list[RefIssue]:
+    """Run full reference check on plain text."""
     refs = _extract_refs(full_text)
     if not refs:
         return []
@@ -273,15 +271,20 @@ def check_references(doc: fitz.Document, filename: str) -> list[RefIssue]:
             )
         )
 
-    # Attach approximate page numbers (last page for references)
-    last_page = doc.page_count
+    # Attach approximate page numbers
     if last_page <= 0:
-        return issues
+        last_page = 1
     for issue in issues:
         if issue.page == 0:
             issue.page = last_page
 
     return issues
+
+
+def check_references(doc: fitz.Document, filename: str) -> list[RefIssue]:
+    """Run full reference check on a PDF document."""
+    full_text = "\n".join(page.get_text("text") or "" for page in doc)
+    return check_references_text(full_text, filename, doc.page_count)
 
 
 def to_findings(issues: list[RefIssue], filename: str) -> list[dict[str, Any]]:
@@ -306,7 +309,23 @@ if __name__ == "__main__":
     import json, sys
     if len(sys.argv) < 2:
         print("Usage: python reference_checker.py <pdf_path>", file=sys.stderr)
+        print("       python reference_checker.py --text <fulltext_path> <filename>", file=sys.stderr)
         sys.exit(1)
+
+    if sys.argv[1] == "--text":
+        if len(sys.argv) < 4:
+            print("Usage: python reference_checker.py --text <fulltext_path> <filename>", file=sys.stderr)
+            sys.exit(1)
+        text_path = Path(sys.argv[2])
+        filename = sys.argv[3]
+        if not text_path.exists():
+            print(f"Error: file not found: {text_path}", file=sys.stderr)
+            sys.exit(1)
+        full_text = text_path.read_text(encoding="utf-8")
+        issues = check_references_text(full_text, filename)
+        print(json.dumps(to_findings(issues, filename), ensure_ascii=False, indent=2))
+        sys.exit(0)
+
     path = Path(sys.argv[1])
     if not path.exists():
         print(f"Error: file not found: {path}", file=sys.stderr)

@@ -11,3 +11,4 @@ BBB/
 batch_proofread_log.json
 .env
 .venv/
+scripts/docx/
