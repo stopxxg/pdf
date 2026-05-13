@@ -12,19 +12,7 @@ from typing import Any
 
 from docx.oxml.ns import qn
 
-
-@dataclass(frozen=True)
-class Finding:
-    file: str
-    page: int
-    target: str
-    category: str
-    suggestion: str
-    severity: str = "medium"
-    source: str = "rule"
-    occurrence: int = 0
-    fallback_rect: tuple[float, float, float, float] | None = None
-    end_of_doc: bool = False
+from shared_rules import Finding, dedupe_findings, SUBSCRIPT_PREFIXES, STAT_SYMBOL_PATTERNS, TEXT_TARGET_RULES, REGEX_RULES
 
 
 def _is_italic(run: Any) -> bool:
@@ -67,13 +55,7 @@ def _find_run_at_offset(runs: list[tuple[int, int, Any]], offset: int) -> Any | 
 def detect_word_stat_symbol_style(document: Any, filename: str) -> list[Finding]:
     """Detect statistical symbols that should be italic but are not."""
     findings: list[Finding] = []
-    stat_patterns = [
-        (re.compile(r"[pP]\s*(?:[<=>≤≥])\s*(?:0?\.\d+|\d+)"), "p", "p值中的p"),
-        (re.compile(r"[I]\d+"), "I", "Moran's I中的I"),
-        (re.compile(r"[R]\d+|R²"), "R", "相关系数R"),
-        (re.compile(r"[F]\s*\(|F\d+"), "F", "F统计量"),
-        (re.compile(r"[tzq]\s*(?:=|<|>|≥|≤|\()"), "tzq", "统计符号"),
-    ]
+    stat_patterns = STAT_SYMBOL_PATTERNS
 
     for para_idx, para in enumerate(document.paragraphs, start=1):
         full_text, runs = _build_para_text_with_runs(para)
@@ -105,7 +87,7 @@ def detect_word_stat_symbol_style(document: Any, filename: str) -> list[Finding]
 def detect_word_script_style(document: Any, filename: str) -> list[Finding]:
     """Detect missing subscripts for variable+digit patterns (e.g., I30, T1)."""
     findings: list[Finding] = []
-    subscript_prefixes = set("ITRPXYZWVSDHCKMNpxyzwvsdhckmn")
+    subscript_prefixes = SUBSCRIPT_PREFIXES
 
     for para_idx, para in enumerate(document.paragraphs, start=1):
         full_text, runs = _build_para_text_with_runs(para)
@@ -199,19 +181,7 @@ def detect_word_text_rules(filename: str, para_idx: int, text: str) -> list[Find
                     )
                 )
 
-    text_targets: list[tuple[str, str, str]] = [
-        ("http：", "文字/标点", "URL存在全角冒号，可能导致链接失效。建议改为半角“http://”或“https://”。"),
-        ("https：", "文字/标点", "URL存在全角冒号，可能导致链接失效。建议改为半角“https://”。"),
-        ("0. 001", "文字/标点", "数值“0. 001”中存在多余空格。建议改为“0.001”。"),
-        ("，。", "文字/标点", "连续出现逗号和句号。建议删除多余标点。"),
-        ("。。", "文字/标点", "连续出现两个句号。建议删除多余标点。"),
-        ("..", "文字/标点", "连续出现两个英文句点。建议核查DOI、URL或参考文献标点。"),
-        ("、、", "文字/标点", "连续出现两个顿号。建议删除多余顿号。"),
-        ("本研仍", "文字/标点", "“本研”疑为“本研究”。建议补全。"),
-        ("波段性", "文字/标点", "“波段性”在趋势描述中疑为“波动性”。建议核改。"),
-        ("与和", "文字/标点", "“与和”连用不当。建议删除多余连接词。"),
-        ("摘 要", "文字/标点", "“摘 要”中间有多余空格，应改为“摘要”。"),
-    ]
+    text_targets = TEXT_TARGET_RULES
     for target, category, suggestion in text_targets:
         occurrence = 0
         start = 0
@@ -229,13 +199,7 @@ def detect_word_text_rules(filename: str, para_idx: int, text: str) -> list[Find
             start = hit + len(target)
 
     # Regex-based rules
-    regex_rules: list[tuple[str, str, str]] = [
-        (r"[pP]\s*<\s*0\.\s+0[15]", "公式/统计表达", "p值表达存在多余空格或断裂风险。建议统一为紧凑形式，并核查p是否斜体。"),
-        (r"0\.\s+\d+", "文字/标点", "小数点后存在多余空格，建议删除空格。"),
-        (r"图\s+\d+", "文字/标点", "“图”与编号之间存在多余空格，建议改为“图1”格式。"),
-        (r"表\s+\d+", "文字/标点", "“表”与编号之间存在多余空格，建议改为“表1”格式。"),
-        (r"et al\.[A-Z]", "文字/标点", "“et al.”后缺少空格，建议改为“et al. Author”。"),
-    ]
+    regex_rules = REGEX_RULES
     for regex, category, suggestion in regex_rules:
         occurrence = 0
         for match in re.finditer(regex, text):
@@ -583,13 +547,4 @@ def detect_inconsistent_compounds(document: Any, filename: str) -> list[Finding]
     return []
 
 
-def dedupe_findings(findings: list[Finding]) -> list[Finding]:
-    seen: set[tuple[object, ...]] = set()
-    unique: list[Finding] = []
-    for item in findings:
-        key = (item.file, item.page, item.target, item.category, item.occurrence, item.fallback_rect, item.source)
-        if key in seen:
-            continue
-        seen.add(key)
-        unique.append(item)
-    return unique
+# dedupe_findings imported from shared_rules

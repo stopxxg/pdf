@@ -28,22 +28,12 @@ except ModuleNotFoundError:
         sys.path.insert(0, str(tmp_deps))
     import fitz  # type: ignore
 
+from shared_rules import Finding, dedupe_findings, SUBSCRIPT_PREFIXES, STAT_SYMBOL_PATTERNS, TEXT_TARGET_RULES, REGEX_RULES
+
 
 # ---------------------------------------------------------------------------
 # Data model
 # ---------------------------------------------------------------------------
-@dataclass(frozen=True)
-class Finding:
-    file: str
-    page: int
-    target: str
-    category: str
-    suggestion: str
-    severity: str = "medium"
-    source: str = "rule"
-    occurrence: int = 0
-    fallback_rect: tuple[float, float, float, float] | None = None
-    end_of_doc: bool = False
 
 
 # ---------------------------------------------------------------------------
@@ -448,13 +438,7 @@ def _add_regex_findings(
 
 def detect_stat_symbol_style(doc: fitz.Document, filename: str) -> list[Finding]:
     findings: list[Finding] = []
-    stat_patterns = [
-        (re.compile(r"[pP]\s*(?:[<=>≤≥])\s*(?:0?\.\d+|\d+)"), "p", "p值中的p"),
-        (re.compile(r"[I]\d+"), "I", "Moran's I中的I"),
-        (re.compile(r"[R]\d+|R²"), "R", "相关系数R"),
-        (re.compile(r"[F]\s*\(|F\d+"), "F", "F统计量"),
-        (re.compile(r"[tzq]\s*(?:=|<|>|≥|≤|\()"), "tzq", "统计符号"),
-    ]
+    stat_patterns = STAT_SYMBOL_PATTERNS
     for page_no, page in enumerate(doc, start=1):
         chars = list(page_chars(page))
         text = "".join(str(ch["c"]) for ch in chars)
@@ -500,9 +484,10 @@ def detect_stat_symbol_style(doc: fitz.Document, filename: str) -> list[Finding]
 def detect_script_style(doc: fitz.Document, filename: str) -> list[Finding]:
     """Detect missing subscripts for common variable+digit patterns (e.g., I30, T1)."""
     findings: list[Finding] = []
-    subscript_prefixes = set("ITRPXYZWVSDHCKMNpxyzwvsdhckmn")
+    subscript_prefixes = SUBSCRIPT_PREFIXES
     for page_no, page in enumerate(doc, start=1):
         chars = list(page_chars(page))
+        text = "".join(str(ch["c"]) for ch in chars)
         i = 0
         while i < len(chars) - 1:
             ch = chars[i]
@@ -521,6 +506,19 @@ def detect_script_style(doc: fitz.Document, filename: str) -> list[Finding]:
                     digits.append(chars[j])
                     j += 1
                 if 1 <= len(digits) <= 3:
+                    digit_text = "".join(d["c"] for d in digits)
+                    # Skip likely years (19xx, 20xx)
+                    if len(digit_text) == 4 and digit_text.startswith(("19", "20")):
+                        i = j
+                        continue
+                    # Skip if followed by closing bracket/parenthesis (likely citation/group label)
+                    if j < len(chars) and chars[j]["c"] in ")】）］]}":
+                        i = j
+                        continue
+                    # Skip if preceded by period or comma (likely citation, e.g., "et al., 2023")
+                    if i > 0 and chars[i - 1]["c"] in ".，,":
+                        i = j
+                        continue
                     digit_rects = [fitz.Rect(d["bbox"]) for d in digits]
                     combined_digit_rect = union_rect(digit_rects)
                     digit_size = max(float(d.get("size", 0) or 0) for d in digits)
@@ -533,7 +531,7 @@ def detect_script_style(doc: fitz.Document, filename: str) -> list[Finding]:
                     if not is_sub:
                         gap = digit_rects[0].x0 - letter_rect.x1
                         if gap < letter_size * 1.5:
-                            target_text = ch["c"] + "".join(d["c"] for d in digits)
+                            target_text = ch["c"] + digit_text
                             findings.append(
                                 Finding(
                                     filename,
@@ -571,32 +569,30 @@ def detect_text_rules(filename: str, page_no: int, text: str) -> list[Finding]:
                 "文献标识码疑似缺失。建议按期刊规范补充对应标识码。",
                 "high",
             )
-        missing_labels = [label for label in ["［目的］", "［方法］", "［结果］", "［结论］"] if label not in front]
-        if missing_labels:
-            add_text_finding(
-                findings,
-                filename,
-                page_no,
-                "摘",
-                "摘要结构",
-                f"结构式摘要未检出{''.join(missing_labels)}。建议核查摘要栏目是否完整。",
-                "medium",
-            )
+        # Structured abstract check: support full-width, half-width, and bold brackets
+        abstract_labels = ["目的", "方法", "结果", "结论"]
+        label_patterns = [f"[{label}]" for label in abstract_labels]
+        label_patterns += [f"［{label}］" for label in abstract_labels]
+        label_patterns += [f"【{label}】" for label in abstract_labels]
+        label_patterns += [f"{label}" for label in abstract_labels]  # bold/plain text fallback
+        found_labels = [p for p in label_patterns if p in front]
+        # Only flag if this looks like a research article (not a review)
+        review_keywords = ["综述", "进展", "展望", "review", "overview", "progress"]
+        is_review = any(kw in front for kw in review_keywords)
+        if not is_review and len(found_labels) < 3:
+            missing_labels = [label for label in abstract_labels if not any(label in found for found in found_labels)]
+            if missing_labels:
+                add_text_finding(
+                    findings,
+                    filename,
+                    page_no,
+                    "摘",
+                    "摘要结构",
+                    f"结构式摘要未检出{''.join(missing_labels)}。建议核查摘要栏目是否完整（若本文为综述可忽略）。",
+                    "medium",
+                )
 
-    text_targets: list[tuple[str, str, str]] = [
-        ("http：", "文字/标点", "URL存在全角冒号，可能导致链接失效。建议改为半角“http://”或“https://”。"),
-        ("https：", "文字/标点", "URL存在全角冒号，可能导致链接失效。建议改为半角“https://”。"),
-        ("∥", "文字/标点", "URL中疑似使用了异常双斜线符号。建议改为半角“//”。"),
-        ("0. 001", "文字/标点", "数值“0. 001”中存在多余空格。建议改为“0.001”。"),
-        ("，。", "文字/标点", "连续出现逗号和句号。建议删除多余标点。"),
-        ("。。", "文字/标点", "连续出现两个句号。建议删除多余标点。"),
-        ("..", "文字/标点", "连续出现两个英文句点。建议核查DOI、URL或参考文献标点。"),
-        ("、、", "文字/标点", "连续出现两个顿号。建议删除多余顿号。"),
-        ("本研仍", "文字/标点", "“本研”疑为“本研究”。建议补全。"),
-        ("波段性", "文字/标点", "“波段性”在趋势描述中疑为“波动性”。建议核改。"),
-        ("与和", "文字/标点", "“与和”连用不当。建议删除多余连接词。"),
-        ("摘 要", "文字/标点", "“摘 要”中间有多余空格，应改为“摘要”。"),
-    ]
+    text_targets = TEXT_TARGET_RULES
     for target, category, suggestion in text_targets:
         occurrence = 0
         start = 0
@@ -610,15 +606,7 @@ def detect_text_rules(filename: str, page_no: int, text: str) -> list[Finding]:
             occurrence += 1
             start = hit + len(target)
 
-    _add_regex_findings(findings, filename, page_no, text, [
-        (r"[pP]\s*<\s*0\.\s+0[15]", "公式/统计表达", "p值表达存在多余空格或断裂风险。建议统一为紧凑形式，并核查p是否斜体。"),
-        (r"0\.\s+\d+", "文字/标点", "小数点后存在多余空格，建议删除空格。"),
-        (r"图\s+\d+", "文字/标点", "“图”与编号之间存在多余空格，建议改为“图1”格式。"),
-        (r"表\s+\d+", "文字/标点", "“表”与编号之间存在多余空格，建议改为“表1”格式。"),
-        (r"et al\.[A-Z]", "文字/标点", "“et al.”后缺少空格，建议改为“et al. Author”。"),
-        (r"[a-zA-Z]，[a-zA-Z]", "文字/标点", "英文文本中使用了全角逗号，建议改为半角逗号。"),
-        (r"[a-zA-Z]。[a-zA-Z]", "文字/标点", "英文文本中使用了全角句号，建议改为半角句点。"),
-    ])
+    _add_regex_findings(findings, filename, page_no, text, REGEX_RULES)
 
     lines = [line.strip() for line in text.splitlines() if compact(line)]
     for i in range(len(lines) - 1):
@@ -689,7 +677,8 @@ def detect_reference_sequence(doc: fitz.Document, filename: str) -> list[Finding
                 continue
             if not in_ref_section:
                 continue
-            match = re.match(r"^［([0-9]+)］", stripped)
+            # Support full-width ［1］, half-width [1], and parentheses (1)
+            match = re.match(r"^[\[［(]([0-9]+)[\]］)]", stripped)
             if match:
                 refs.append((int(match.group(1)), page_no, stripped))
     if len(refs) < 2:
@@ -722,8 +711,13 @@ def detect_figure_table_citation_order(doc: fitz.Document, filename: str) -> lis
     findings: list[Finding] = []
     for prefix, label in [("图", "图"), ("表", "表")]:
         cites: list[tuple[int, int]] = []
+        range_covered: set[int] = set()
         for page_no, page in enumerate(doc, start=1):
             text = page.get_text("text") or ""
+            # Detect range citations like "图1—5" or "图2、3、4" and mark them as covered
+            for rmatch in re.finditer(rf"{prefix}\s*([0-9]+)\s*[—~\-～]\s*([0-9]+)", text):
+                start_n, end_n = int(rmatch.group(1)), int(rmatch.group(2))
+                range_covered.update(range(start_n, end_n + 1))
             for match in re.finditer(rf"{prefix}\s*([0-9]+)", text):
                 num = int(match.group(1))
                 cites.append((page_no, num))
@@ -738,7 +732,7 @@ def detect_figure_table_citation_order(doc: fitz.Document, filename: str) -> lis
         if len(first_cites) >= 2:
             nums = [n for _, n in first_cites]
             expected = list(range(min(nums), max(nums) + 1))
-            missing = [n for n in expected if n not in nums]
+            missing = [n for n in expected if n not in nums and n not in range_covered]
             if missing:
                 findings.append(
                     Finding(
@@ -754,16 +748,9 @@ def detect_figure_table_citation_order(doc: fitz.Document, filename: str) -> lis
     return findings
 
 
-def dedupe_findings(findings: list[Finding]) -> list[Finding]:
-    seen: set[tuple[object, ...]] = set()
-    unique: list[Finding] = []
-    for item in findings:
-        key = (item.file, item.page, item.target, item.category, item.occurrence, item.fallback_rect, item.source)
-        if key in seen:
-            continue
-        seen.add(key)
-        unique.append(item)
-    return unique
+# ---------------------------------------------------------------------------
+# Prepare phase: extract + rules + review context
+# ---------------------------------------------------------------------------
 
 
 # ---------------------------------------------------------------------------
@@ -1186,7 +1173,8 @@ def main() -> int:
     parser = argparse.ArgumentParser(
         description="High-precision PDF proofreading pipeline for Chinese academic journals.",
     )
-    parser.add_argument("--root", type=Path, required=True, help="Folder containing source PDFs.")
+    parser.add_argument("--root", type=Path, help="Folder containing source PDFs. Optional when --file is given.")
+    parser.add_argument("--file", type=Path, help="Process a single specific PDF file instead of scanning a folder.")
     parser.add_argument("--output", type=Path, help="Output folder. Defaults to ROOT/annotated_pdfs.")
     parser.add_argument("--mode", choices=["prepare", "annotate"], default="prepare",
                         help="prepare: extract text, render pages, run rule checks. "
@@ -1202,11 +1190,18 @@ def main() -> int:
         print("Warning: render-dpi below 100 may reduce visual inspection quality. Using 100.", file=sys.stderr)
         args.render_dpi = 100
 
-    root = args.root.resolve()
-    output_dir = resolve_output(root, args.output)
-    pdfs = pdfs_under(root, output_dir)
-    if args.limit > 0:
-        pdfs = pdfs[: args.limit]
+    if args.file:
+        pdfs = [args.file.resolve()]
+        root = args.file.resolve().parent
+        output_dir = resolve_output(root, args.output)
+    else:
+        if not args.root:
+            raise SystemExit("Either --root or --file is required.")
+        root = args.root.resolve()
+        output_dir = resolve_output(root, args.output)
+        pdfs = pdfs_under(root, output_dir)
+        if args.limit > 0:
+            pdfs = pdfs[: args.limit]
 
     results: list[dict[str, object]] = []
     if args.mode == "prepare":
