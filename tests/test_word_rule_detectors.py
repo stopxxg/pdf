@@ -80,3 +80,11 @@ def test_is_subscript_true_when_vertalign_is_subscript():
     rPr.find.return_value = vertAlign
     run._r.find.return_value = rPr
     assert _is_subscript(run) is True
+
+def test_no_false_positive_on_kuaisu_di():
+    """快速地 + verb is grammatically correct; do not flag it."""
+    from word_rule_detectors import detect_common_typos
+    doc = MagicMock()
+    doc.paragraphs = [MagicMock(text="快速地完成了实验。")]
+    findings = detect_common_typos(doc, "test.docx")
+    assert not any("快速地" in f.suggestion for f in findings)

@@ -489,9 +489,9 @@ def detect_common_typos(document: Any, filename: str) -> list[Finding]:
     findings: list[Finding] = []
 
     # Chinese typo patterns (heuristic regexes)
-    # NOTE: 的/地/得 rules are conservative — only flag unambiguous adverbial phrases.
+    # NOTE: 的/地/得 rules are deliberately omitted because the adverbial
+    # particle 地 before a verb is grammatically correct (e.g. 快速地完成).
     chinese_typos: list[tuple[str, str, str]] = [
-        (r"快速地[做进]", "文字/用词", "“快速地”后若接动词，确认是否应为“快速地”。"),
         (r"走的快", "文字/用词", "“走的快”疑为“走得快”，补语前应用“得”。"),
         (r"跑的快", "文字/用词", "“跑的快”疑为“跑得快”，补语前应用“得”。"),
         (r"在次", "文字/用词", "“在次”疑为“再次”。"),
