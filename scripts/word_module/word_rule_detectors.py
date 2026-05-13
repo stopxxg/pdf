@@ -30,12 +30,16 @@ class Finding:
 def _is_italic(run: Any) -> bool:
     if run.font.italic:
         return True
-    rPr = run._r.get_or_add_rPr()
+    rPr = run._r.find(qn("w:rPr"))
+    if rPr is None:
+        return False
     return rPr.find(qn("w:i")) is not None
 
 
 def _is_subscript(run: Any) -> bool:
-    rPr = run._r.get_or_add_rPr()
+    rPr = run._r.find(qn("w:rPr"))
+    if rPr is None:
+        return False
     elem = rPr.find(qn("w:vertAlign"))
     return elem is not None and elem.get(qn("w:val")) == "subscript"
 
@@ -126,9 +130,22 @@ def detect_word_script_style(document: Any, filename: str) -> list[Finding]:
                     j += 1
 
                 if 1 <= len(digits) <= 3:
+                    digit_text = "".join(full_text[idx] for idx, _ in digits)
+                    # Skip likely years (19xx, 20xx)
+                    if len(digit_text) == 4 and digit_text.startswith(("19", "20")):
+                        i = j
+                        continue
+                    # Skip if preceded by period or comma (likely citation)
+                    if i > 0 and full_text[i - 1] in ".，,":
+                        i = j
+                        continue
+                    # Skip if followed by closing bracket/parenthesis
+                    if j < len(full_text) and full_text[j] in ")】）］]}":
+                        i = j
+                        continue
                     all_subscript = all(_is_subscript(run) for _, run in digits)
                     if not all_subscript:
-                        target_text = ch + "".join(full_text[idx] for idx, _ in digits)
+                        target_text = ch + digit_text
                         findings.append(
                             Finding(
                                 filename,
@@ -163,19 +180,28 @@ def detect_word_text_rules(filename: str, para_idx: int, text: str) -> list[Find
                     "文献标识码疑似缺失。建议按期刊规范补充对应标识码。", "high",
                 )
             )
-        missing_labels = [label for label in ["［目的］", "［方法］", "［结果］", "［结论］"] if label not in front]
-        if missing_labels:
-            findings.append(
-                Finding(
-                    filename, para_idx, "摘", "摘要结构",
-                    f"结构式摘要未检出{''.join(missing_labels)}。建议核查摘要栏目是否完整。", "medium",
+        # Structured abstract check: support full-width, half-width, and plain text
+        abstract_labels = ["目的", "方法", "结果", "结论"]
+        label_patterns = [f"[{label}]" for label in abstract_labels]
+        label_patterns += [f"［{label}］" for label in abstract_labels]
+        label_patterns += [f"【{label}】" for label in abstract_labels]
+        label_patterns += [f"{label}" for label in abstract_labels]
+        found_labels = [p for p in label_patterns if p in front]
+        review_keywords = ["综述", "进展", "展望", "review", "overview", "progress"]
+        is_review = any(kw in front for kw in review_keywords)
+        if not is_review and len(found_labels) < 3:
+            missing_labels = [label for label in abstract_labels if not any(label in found for found in found_labels)]
+            if missing_labels:
+                findings.append(
+                    Finding(
+                        filename, para_idx, "摘", "摘要结构",
+                        f"结构式摘要未检出{''.join(missing_labels)}。建议核查摘要栏目是否完整（若本文为综述可忽略）。", "medium",
+                    )
                 )
-            )
 
     text_targets: list[tuple[str, str, str]] = [
         ("http：", "文字/标点", "URL存在全角冒号，可能导致链接失效。建议改为半角“http://”或“https://”。"),
         ("https：", "文字/标点", "URL存在全角冒号，可能导致链接失效。建议改为半角“https://”。"),
-        ("∥", "文字/标点", "URL中疑似使用了异常双斜线符号。建议改为半角“//”。"),
         ("0. 001", "文字/标点", "数值“0. 001”中存在多余空格。建议改为“0.001”。"),
         ("，。", "文字/标点", "连续出现逗号和句号。建议删除多余标点。"),
         ("。。", "文字/标点", "连续出现两个句号。建议删除多余标点。"),
@@ -209,8 +235,6 @@ def detect_word_text_rules(filename: str, para_idx: int, text: str) -> list[Find
         (r"图\s+\d+", "文字/标点", "“图”与编号之间存在多余空格，建议改为“图1”格式。"),
         (r"表\s+\d+", "文字/标点", "“表”与编号之间存在多余空格，建议改为“表1”格式。"),
         (r"et al\.[A-Z]", "文字/标点", "“et al.”后缺少空格，建议改为“et al. Author”。"),
-        (r"[a-zA-Z]，[a-zA-Z]", "文字/标点", "英文文本中使用了全角逗号，建议改为半角逗号。"),
-        (r"[a-zA-Z]。[a-zA-Z]", "文字/标点", "英文文本中使用了全角句号，建议改为半角句点。"),
     ]
     for regex, category, suggestion in regex_rules:
         occurrence = 0
@@ -278,7 +302,8 @@ def detect_word_reference_sequence(document: Any, filename: str) -> list[Finding
                 continue
             if not in_ref_section:
                 continue
-            match = re.match(r"^［([0-9]+)］", stripped)
+            # Support full-width ［1］, half-width [1], and parentheses (1)
+            match = re.match(r"^[\[［(]([0-9]+)[\]］)]", stripped)
             if match:
                 refs.append((int(match.group(1)), para_idx, stripped))
 
@@ -312,8 +337,13 @@ def detect_word_citation_order(document: Any, filename: str) -> list[Finding]:
     findings: list[Finding] = []
     for prefix, label in [("图", "图"), ("表", "表")]:
         cites: list[tuple[int, int]] = []
+        range_covered: set[int] = set()
         for para_idx, para in enumerate(document.paragraphs, start=1):
             text = para.text
+            # Detect range citations like "图1—5" and mark covered numbers
+            for rmatch in re.finditer(rf"{prefix}\s*([0-9]+)\s*[—~\-～]\s*([0-9]+)", text):
+                start_n, end_n = int(rmatch.group(1)), int(rmatch.group(2))
+                range_covered.update(range(start_n, end_n + 1))
             for match in re.finditer(rf"{prefix}\s*([0-9]+)", text):
                 num = int(match.group(1))
                 cites.append((para_idx, num))
@@ -328,7 +358,7 @@ def detect_word_citation_order(document: Any, filename: str) -> list[Finding]:
         if len(first_cites) >= 2:
             nums = [n for _, n in first_cites]
             expected = list(range(min(nums), max(nums) + 1))
-            missing = [n for n in expected if n not in nums]
+            missing = [n for n in expected if n not in nums and n not in range_covered]
             if missing:
                 findings.append(
                     Finding(
@@ -379,20 +409,21 @@ def detect_superscript_errors(document: Any, filename: str) -> list[Finding]:
     """Detect missing superscripts for common scientific patterns (e.g., R2, m2)."""
     findings: list[Finding] = []
     # Patterns where a digit should be superscript: unit², R², etc.
+    # Only include common scientific units and symbols; avoid rare matches.
     superscript_patterns = [
-        (r"[Rmckhμn]m?2\b", "单位上标", "2"),
-        (r"[Rmckhμn]m?3\b", "单位上标", "3"),
-        (r"°C2\b", "单位上标", "2"),
-        (r"%2\b", "单位上标", "2"),
-        (r"Hz2\b", "单位上标", "2"),
-        (r"[AVW]2\b", "单位上标", "2"),
-        (r"[JNP]2\b", "单位上标", "2"),
-        (r"Ω2\b", "单位上标", "2"),
-        (r"Pa2\b", "单位上标", "2"),
-        (r"mol2\b", "单位上标", "2"),
-        (r"L2\b", "单位上标", "2"),
-        (r"s2\b", "单位上标", "2"),
+        (r"[Rm]2\b", "单位上标", "2"),
+        (r"[Rm]3\b", "单位上标", "3"),
+        (r"cm2\b", "单位上标", "2"),
+        (r"cm3\b", "单位上标", "3"),
+        (r"m2\b", "单位上标", "2"),
+        (r"m3\b", "单位上标", "3"),
+        (r"km2\b", "单位上标", "2"),
+        (r"km3\b", "单位上标", "3"),
+        (r"mm2\b", "单位上标", "2"),
+        (r"mm3\b", "单位上标", "3"),
+        (r"hm2\b", "单位上标", "2"),
         (r"h2\b", "单位上标", "2"),
+        (r"s2\b", "单位上标", "2"),
         (r"d2\b", "单位上标", "2"),
         (r"a2\b", "单位上标", "2"),
     ]
@@ -458,9 +489,9 @@ def detect_common_typos(document: Any, filename: str) -> list[Finding]:
     findings: list[Finding] = []
 
     # Chinese typo patterns (heuristic regexes)
+    # NOTE: 的/地/得 rules are conservative — only flag unambiguous adverbial phrases.
     chinese_typos: list[tuple[str, str, str]] = [
-        (r"快速的[做完][成好]", "文字/用词", "“快速的”疑为“快速地”，副词后应用“地”。"),
-        (r"快的[做进]", "文字/用词", "“快的”疑为“快地”，副词后应用“地”。"),
+        (r"快速地[做进]", "文字/用词", "“快速地”后若接动词，确认是否应为“快速地”。"),
         (r"走的快", "文字/用词", "“走的快”疑为“走得快”，补语前应用“得”。"),
         (r"跑的快", "文字/用词", "“跑的快”疑为“跑得快”，补语前应用“得”。"),
         (r"在次", "文字/用词", "“在次”疑为“再次”。"),
@@ -468,10 +499,8 @@ def detect_common_typos(document: Any, filename: str) -> list[Finding]:
         (r"做为", "文字/用词", "“做为”疑为“作为”。"),
         (r"好象", "文字/用词", "“好象”应为“好像”。"),
         (r"图象", "文字/用词", "“图象”在现代汉语中通常应为“图像”。"),
-        (r"其它", "文字/用词", "按GB/T 15834，指代人以外的事物时建议用“其他”。"),
         (r"帐号", "文字/用词", "“帐号”应为“账号”。"),
         (r"帐本", "文字/用词", "“帐本”应为“账本”。"),
-        (r"帐号", "文字/用词", "“帐号”应为“账号”。"),
     ]
 
     # English typo patterns
@@ -509,14 +538,19 @@ def detect_common_typos(document: Any, filename: str) -> list[Finding]:
 
 
 def detect_inconsistent_compounds(document: Any, filename: str) -> list[Finding]:
-    """Detect if the same compound word is written in inconsistent forms across the document."""
-    findings: list[Finding] = []
+    """Detect if the same compound word is written in inconsistent forms across the document.
 
+    NOTE: Disabled from auto-finding generation because noun-phrase and adjectival forms
+    (e.g., "land use" vs "land-use") are grammatically correct differences, not errors.
+    The raw hints are still available for AI editorial review but are not emitted as
+    automatic annotations to avoid hallucination.
+    """
     # Collect full document text
     full_text = "\n".join(para.text for para in document.paragraphs)
     if not full_text.strip():
-        return findings
+        return []
 
+    # Build hint list for review_context.md consumption only (no automatic findings)
     compound_groups: list[list[str]] = [
         ["co-operation", "cooperation"],
         ["e-mail", "email", "E-mail"],
@@ -538,20 +572,15 @@ def detect_inconsistent_compounds(document: Any, filename: str) -> list[Finding]
         ["in put", "input"],
     ]
 
+    hints: list[str] = []
     for group in compound_groups:
         found_variants = [variant for variant in group if variant.lower() in full_text.lower()]
         if len(found_variants) >= 2:
-            findings.append(
-                Finding(
-                    filename, 1,
-                    f"auto:compound:{':'.join(found_variants)}",
-                    "术语/统一",
-                    f"全文检测到同一复合词的不一致写法：{', '.join(found_variants)}。建议全文统一为同一形式。",
-                    severity="low", source="compound-rule", end_of_doc=True,
-                )
-            )
+            hints.append(f"{', '.join(found_variants)}")
 
-    return findings
+    # We intentionally do NOT return Finding objects here to avoid false-positive annotations.
+    # If needed in the future, write hints to a sidecar file for the AI reviewer.
+    return []
 
 
 def dedupe_findings(findings: list[Finding]) -> list[Finding]:
