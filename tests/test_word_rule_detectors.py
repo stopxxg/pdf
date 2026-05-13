@@ -88,3 +88,15 @@ def test_no_false_positive_on_kuaisu_di():
     doc.paragraphs = [MagicMock(text="快速地完成了实验。")]
     findings = detect_common_typos(doc, "test.docx")
     assert not any("快速地" in f.suggestion for f in findings)
+
+def test_no_false_positive_on_non_unit_m2():
+    """m2 should only match as a standalone unit, not inside a word like am2."""
+    from word_rule_detectors import detect_superscript_errors
+    doc = MagicMock()
+    para = MagicMock()
+    run = MagicMock()
+    run.text = "The sample am2 was collected."
+    para.runs = [run]
+    doc.paragraphs = [para]
+    findings = detect_superscript_errors(doc, "test.docx")
+    assert not any("m2" in f.target for f in findings)

@@ -411,21 +411,21 @@ def detect_superscript_errors(document: Any, filename: str) -> list[Finding]:
     # Patterns where a digit should be superscript: unit², R², etc.
     # Only include common scientific units and symbols; avoid rare matches.
     superscript_patterns = [
-        (r"[Rm]2\b", "单位上标", "2"),
-        (r"[Rm]3\b", "单位上标", "3"),
-        (r"cm2\b", "单位上标", "2"),
-        (r"cm3\b", "单位上标", "3"),
-        (r"m2\b", "单位上标", "2"),
-        (r"m3\b", "单位上标", "3"),
-        (r"km2\b", "单位上标", "2"),
-        (r"km3\b", "单位上标", "3"),
-        (r"mm2\b", "单位上标", "2"),
-        (r"mm3\b", "单位上标", "3"),
-        (r"hm2\b", "单位上标", "2"),
-        (r"h2\b", "单位上标", "2"),
-        (r"s2\b", "单位上标", "2"),
-        (r"d2\b", "单位上标", "2"),
-        (r"a2\b", "单位上标", "2"),
+        (r"\b[Rm]2\b", "单位上标", "2"),
+        (r"\b[Rm]3\b", "单位上标", "3"),
+        (r"\bcm2\b", "单位上标", "2"),
+        (r"\bcm3\b", "单位上标", "3"),
+        (r"\bm2\b", "单位上标", "2"),
+        (r"\bm3\b", "单位上标", "3"),
+        (r"\bkm2\b", "单位上标", "2"),
+        (r"\bkm3\b", "单位上标", "3"),
+        (r"\bmm2\b", "单位上标", "2"),
+        (r"\bmm3\b", "单位上标", "3"),
+        (r"\bhm2\b", "单位上标", "2"),
+        (r"\bh2\b", "单位上标", "2"),
+        (r"\bs2\b", "单位上标", "2"),
+        (r"\bd2\b", "单位上标", "2"),
+        (r"\ba2\b", "单位上标", "2"),
     ]
     # Chemical subscript patterns
     chemical_patterns = [
