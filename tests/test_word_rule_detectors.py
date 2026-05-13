@@ -2,7 +2,8 @@ import sys
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent / "scripts" / "word_module"))
 
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
+from docx.oxml.ns import qn
 from word_rule_detectors import _is_italic, _is_subscript
 
 def test_is_italic_does_not_mutate_document():
@@ -22,3 +23,60 @@ def test_is_subscript_does_not_mutate_document():
     result = _is_subscript(run)
     run._r.get_or_add_rPr.assert_not_called()
     assert result is False
+
+def test_is_italic_true_when_font_italic_set():
+    run = MagicMock()
+    run.font.italic = True
+    assert _is_italic(run) is True
+
+def test_is_italic_false_when_no_rpr():
+    run = MagicMock()
+    run.font.italic = None
+    run._r.find.return_value = None
+    assert _is_italic(run) is False
+
+def test_is_italic_false_when_rpr_without_i():
+    run = MagicMock()
+    run.font.italic = None
+    rPr = MagicMock()
+    rPr.find.return_value = None
+    run._r.find.return_value = rPr
+    assert _is_italic(run) is False
+
+def test_is_italic_true_when_rpr_has_i():
+    run = MagicMock()
+    run.font.italic = None
+    rPr = MagicMock()
+    rPr.find.return_value = MagicMock()  # w:i element exists
+    run._r.find.return_value = rPr
+    assert _is_italic(run) is True
+
+def test_is_subscript_false_when_no_rpr():
+    run = MagicMock()
+    run._r.find.return_value = None
+    assert _is_subscript(run) is False
+
+def test_is_subscript_false_when_rpr_without_vertalign():
+    run = MagicMock()
+    rPr = MagicMock()
+    rPr.find.return_value = None
+    run._r.find.return_value = rPr
+    assert _is_subscript(run) is False
+
+def test_is_subscript_false_when_vertalign_is_superscript():
+    run = MagicMock()
+    rPr = MagicMock()
+    vertAlign = MagicMock()
+    vertAlign.get.return_value = "superscript"
+    rPr.find.return_value = vertAlign
+    run._r.find.return_value = rPr
+    assert _is_subscript(run) is False
+
+def test_is_subscript_true_when_vertalign_is_subscript():
+    run = MagicMock()
+    rPr = MagicMock()
+    vertAlign = MagicMock()
+    vertAlign.get.return_value = "subscript"
+    rPr.find.return_value = vertAlign
+    run._r.find.return_value = rPr
+    assert _is_subscript(run) is True
