@@ -502,13 +502,13 @@ def detect_common_typos(document: Any, filename: str) -> list[Finding]:
 
 
 def detect_inconsistent_compounds(document: Any, filename: str) -> list[Finding]:
-    """DEAD CODE — intentionally not called by word_pipeline.py.
+    """Detect if the same compound word is written in inconsistent forms across the document.
 
-    The function exists only as a reference implementation. Compound-word
-    form variations (land use vs land-use) are grammatically correct
-    differences, not errors, so we deliberately do NOT emit automatic
-    findings for them. If this logic is ever needed, it should write
-    hints to review_context.md rather than return Finding objects.
+    Called by word_pipeline.py, but deliberately returns an empty list to avoid
+    false-positive annotations. Compound-word form variations (e.g. "land use"
+    vs "land-use") are grammatically correct differences, not errors. The raw
+    hints are built for AI editorial review in review_context.md but are not
+    emitted as automatic annotations.
     """
     # Collect full document text
     full_text = "\n".join(para.text for para in document.paragraphs)
