@@ -182,7 +182,7 @@ def _check_ref_format(ref_no: int, text: str) -> list[RefIssue]:
 
     # Bilingual reference consistency (English translation should not have serial number)
     if re.search(r"[一-鿿]", t):
-        match = re.search(r"\b(\d{1,3})\s+[A-Z][a-zA-Z\s,]+\.\s*[A-Z]", t)
+        match = re.search(r"\b(\d{1,3})\s+[A-Z][a-zA-Z\s,'\-]+\.\s*[A-Z]", t)
         if match:
             start = match.start()
             preceding = t[max(0, start - 15):start]
