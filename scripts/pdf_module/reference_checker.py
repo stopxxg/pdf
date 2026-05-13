@@ -98,19 +98,23 @@ def _check_ref_format(ref_no: int, text: str) -> list[RefIssue]:
 
     # Chinese references with missing "等"
     if re.search(r"[一-鿿]", t) and "，" in t:
-        # If there are 4+ Chinese authors and no "等"
+        # Extract author part: before the first period, Chinese comma, or title marker
         authors_part = t.split(".")[0] if "." in t else t.split("。")[0]
-        if authors_part.count("，") >= 3 and "等" not in authors_part:
-            issues.append(
-                RefIssue(
-                    page=0,
-                    ref_no=ref_no,
-                    target=authors_part[:30],
-                    category="参考文献格式",
-                    suggestion="中文参考文献作者超过3人时，建议在第3人后加“等”。",
-                    severity="low",
+        # Count authors by Chinese commas, but only if the commas are within reasonable length
+        if len(authors_part) < 80:
+            comma_count = authors_part.count("，")
+            # Heuristic: 3 commas ≈ 4 authors; require at least 3 commas and no "等"
+            if comma_count >= 3 and "等" not in authors_part:
+                issues.append(
+                    RefIssue(
+                        page=0,
+                        ref_no=ref_no,
+                        target=authors_part[:30],
+                        category="参考文献格式",
+                        suggestion="中文参考文献作者超过3人时，建议在第3人后加“等”。",
+                        severity="low",
+                    )
                 )
-            )
 
     # Volume/issue completeness for journal articles
     if "[J]" in t or "[J/OL]" in t:
@@ -118,8 +122,11 @@ def _check_ref_format(ref_no: int, text: str) -> list[RefIssue]:
         year_match = re.search(r"(\d{4})", t)
         if year_match:
             after_year = t[year_match.end():]
-            # Check for volume(issue) pattern like , 33(5):
-            if not re.search(r",\s*\d+\s*\(\s*\d+\s*\)", after_year):
+            # Accept multiple styles: , 33(5) ; Vol.33, No.5 ; only volume
+            has_volume_issue = re.search(r",\s*\d+\s*\(\s*\d+\s*\)", after_year)
+            has_vol_no = re.search(r"Vol\.\s*\d+|No\.\s*\d+", after_year, re.IGNORECASE)
+            has_only_volume = re.search(r",\s*\d+\s*[:：.]", after_year)
+            if not has_volume_issue and not has_vol_no and not has_only_volume:
                 issues.append(
                     RefIssue(
                         page=0,
@@ -127,13 +134,15 @@ def _check_ref_format(ref_no: int, text: str) -> list[RefIssue]:
                         target=t[:40],
                         category="参考文献格式",
                         suggestion="期刊参考文献建议补充完整的卷(期)号，如“2026，33(5)”。",
-                        severity="medium",
+                        severity="low",
                     )
                 )
 
     # Page range or article number
     if "[J]" in t or "[J/OL]" in t:
-        if not re.search(r"[:：]\s*\d+[-–—]\d+", t) and not re.search(r"[:：]\s*\d+", t):
+        # Accept colon, period, or space before page numbers
+        has_pages = re.search(r"[:：.\s]\s*\d+[-–—]\d+", t) or re.search(r"[:：.\s]\s*\d{3,}", t)
+        if not has_pages:
             issues.append(
                 RefIssue(
                     page=0,
@@ -141,7 +150,7 @@ def _check_ref_format(ref_no: int, text: str) -> list[RefIssue]:
                     target=t[:40],
                     category="参考文献格式",
                     suggestion="期刊参考文献缺少起止页码或文章编号，建议补充。",
-                    severity="medium",
+                    severity="low",
                 )
             )
 
@@ -173,21 +182,22 @@ def _check_ref_format(ref_no: int, text: str) -> list[RefIssue]:
 
     # Bilingual reference consistency (English translation should not have serial number)
     if re.search(r"[一-鿿]", t):
-        # Check if English translation paragraph starts with a number
-        en_parts = re.split(r"(?=[A-Z][a-z]+\s+[A-Z])", t)
-        for part in en_parts:
-            if re.match(r"^\d+", part.strip()) and len(part.strip()) > 20:
+        match = re.search(r"\b(\d{1,3})\s+[A-Z][a-zA-Z\s,]+\.\s*[A-Z]", t)
+        if match:
+            start = match.start()
+            preceding = t[max(0, start - 15):start]
+            # Skip if the number is part of a year/vol/issue citation like "2024, 33"
+            if not re.search(r"(?:19|20)\d{2}\s*[-,;:\s]*\s*$", preceding):
                 issues.append(
                     RefIssue(
                         page=0,
                         ref_no=ref_no,
-                        target=part[:30],
+                        target=t[:30],
                         category="参考文献格式",
                         suggestion="双语参考文献的英文翻译不应另加序号，建议删除开头编号。",
                         severity="low",
                     )
                 )
-                break
 
     return issues
 
@@ -258,18 +268,7 @@ def check_references_text(full_text: str, filename: str, last_page: int = 1) -> 
             )
         )
 
-    # 4. Report total count for information (not an error; journals have varying limits)
-    if len(refs) > 30:
-        issues.append(
-            RefIssue(
-                page=0,
-                ref_no=None,
-                target=f"参考文献（共{len(refs)}条）",
-                category="参考文献格式",
-                suggestion=f"参考文献共{len(refs)}条，超过本刊一般不超过30篇的要求，建议精简。",
-                severity="low",
-            )
-        )
+    # 4. Reference count is intentionally not flagged automatically because journal limits vary.
 
     # Attach approximate page numbers
     if last_page <= 0:
