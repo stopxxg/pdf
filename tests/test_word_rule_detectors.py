@@ -1,5 +1,6 @@
 import sys
 from pathlib import Path
+sys.path.insert(0, str(Path(__file__).parent.parent / "scripts"))
 sys.path.insert(0, str(Path(__file__).parent.parent / "scripts" / "word_module"))
 
 from unittest.mock import MagicMock, patch

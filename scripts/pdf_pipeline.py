@@ -79,6 +79,13 @@ def _italic_flag() -> int:
         return 2
 
 
+def _bold_flag() -> int:
+    try:
+        return int(fitz.TEXT_FONT_BOLD)  # type: ignore[attr-defined]
+    except Exception:
+        return 1
+
+
 def is_italic(char: dict[str, object]) -> bool:
     font = str(char.get("font", "")).lower()
     flags = int(char.get("flags", 0))
@@ -113,6 +120,12 @@ def _is_italic_span(span: dict[str, object]) -> bool:
     return bool(flags & _italic_flag()) or "italic" in font or "oblique" in font
 
 
+def _is_bold_span(span: dict[str, object]) -> bool:
+    font = str(span.get("font", "")).lower()
+    flags = int(span.get("flags", 0) or 0)
+    return bool(flags & _bold_flag()) or "bold" in font
+
+
 def _span_text_with_markup(span: dict[str, object], apply_markup: bool = True) -> str:
     chars = span.get("chars", [])
     if not chars:
@@ -145,41 +158,51 @@ def _span_text_with_markup(span: dict[str, object], apply_markup: bool = True) -
     ys = [ci["bbox"][1] for ci in char_infos]
     baseline = sum(ys) / len(ys) if ys else 0
 
-    # Tag each char
-    tagged: list[tuple[str, str]] = []  # (tag, char)
+    # Tag each char — bold, italic and sub/sup can co-occur
+    tagged: list[tuple[str, str]] = []  # (tag_string, char)
     for ci in char_infos:
         c = ci["c"]
         size = ci["size"]
         y = ci["bbox"][1]
         dy = y - baseline
-        tag = ""
+        tags: list[str] = []
         if size > 0 and base_size > 0:
             if size < base_size * 0.85 and dy < -base_size * 0.1:
-                tag = "sup"
+                tags.append("sup")
             elif size < base_size * 0.85 and dy > base_size * 0.05:
-                tag = "sub"
-        if _is_italic_span(span) and not tag:
-            tag = "i"
-        tagged.append((tag, c))
+                tags.append("sub")
+        if _is_italic_span(span):
+            tags.append("i")
+        if _is_bold_span(span):
+            tags.append("b")
+        # Canonical tag order: bold outermost, italic middle, sub/sup innermost
+        tags.sort(key=lambda t: {"sub": 0, "sup": 0, "i": 1, "b": 2}.get(t, 3))
+        tagged.append(("+".join(tags) if tags else "", c))
 
-    # Merge consecutive same tags
+    # Merge consecutive identical tag-sets
     result_parts: list[str] = []
-    current_tag = ""
+    current_tag_set = ""
     current_chars: list[str] = []
+
+    def _wrap(s: str, tag_list: list[str]) -> str:
+        for t in tag_list:
+            s = f"<{t}>{s}</{t}>"
+        return s
 
     def flush():
         if not current_chars:
             return
         s = "".join(current_chars)
-        if current_tag:
-            result_parts.append(f"<{current_tag}>{s}</{current_tag}>")
+        if current_tag_set:
+            tag_list = current_tag_set.split("+")
+            result_parts.append(_wrap(s, tag_list))
         else:
             result_parts.append(s)
 
-    for tag, c in tagged:
-        if tag != current_tag:
+    for tag_set, c in tagged:
+        if tag_set != current_tag_set:
             flush()
-            current_tag = tag
+            current_tag_set = tag_set
             current_chars = [c]
         else:
             current_chars.append(c)
@@ -200,14 +223,38 @@ def _line_text_with_markup(line: dict[str, object], apply_markup: bool = True) -
     return "".join(parts)
 
 
-def _classify_blocks(blocks: list[tuple]) -> tuple[list[tuple], list[tuple], list[tuple]]:
+def _vertical_coverage(blocks: list[tuple]) -> float:
+    """Fraction of page height covered by the given blocks (0.0–1.0)."""
+    if not blocks:
+        return 0.0
+    ys = sorted([b[1] for b in blocks])
+    total = 0.0
+    current_start = ys[0]
+    current_end = ys[0]
+    for y in ys[1:]:
+        if y <= current_end + 20:
+            current_end = y
+        else:
+            total += current_end - current_start
+            current_start = y
+            current_end = y
+    total += current_end - current_start
+    # Normalize against a typical A4 body height (~750pt). Using actual page
+    # height would require passing page_rect, but the threshold check only
+    # needs a rough relative measure — the caller already requires ≥3 blocks
+    # on each side, so coverage just guards against narrow incidental columns.
+    return total / 800.0 if total > 0 else 0.0
+
+
+def _classify_blocks(blocks: list[tuple], page_rect: fitz.Rect) -> tuple[list[tuple], list[tuple], list[tuple]]:
+    """Split blocks into left-column, right-column, and full-width groups.
+
+    Uses the actual page midpoint (not block-extent midpoint) so that
+    single-column pages with narrow content aren't misclassified.
+    """
     if not blocks:
         return [], [], []
-    xs = [b[0] for b in blocks]
-    xes = [b[2] for b in blocks]
-    min_x, max_x = min(xs), max(xes)
-    width = max_x - min_x
-    mid = min_x + width / 2
+    mid = page_rect.width / 2
 
     left: list[tuple] = []
     right: list[tuple] = []
@@ -230,8 +277,20 @@ def _classify_blocks(blocks: list[tuple]) -> tuple[list[tuple], list[tuple], lis
 
 
 def _sort_dual_column(blocks: list[tuple], page_rect: fitz.Rect) -> list[tuple]:
-    left, right, full = _classify_blocks(blocks)
-    is_dual = len(left) >= 3 and len(right) >= 3
+    """Re-order blocks for dual-column reading order: header → left col → middle → right col → footer.
+
+    Single-column pages are returned in natural top-to-bottom order.
+    Dual-column detection requires ≥3 blocks on each side AND ≥30% vertical
+    coverage on each side (matching extract_page_text criteria), which guards
+    against false positives on pages where content happens to cluster left/right.
+    """
+    left, right, full = _classify_blocks(blocks, page_rect)
+    left_cov = _vertical_coverage(left)
+    right_cov = _vertical_coverage(right)
+    is_dual = (
+        len(left) >= 3 and len(right) >= 3
+        and left_cov >= 0.30 and right_cov >= 0.30
+    )
     if not is_dual:
         return sorted(blocks, key=lambda b: (b[1], b[0]))
 
@@ -279,85 +338,85 @@ def _page_to_markdown(page: fitz.Page, page_no: int, apply_markup: bool = True) 
             blocks.append((bbox[0], bbox[1], bbox[2], bbox[3], paragraph))
 
     sorted_blocks = _sort_dual_column(blocks, page.rect)
-    paragraphs = [b[4] for b in sorted_blocks if b[4].strip()]
+    raw_paragraphs = [b[4] for b in sorted_blocks if b[4].strip()]
 
-    if not paragraphs:
+    if not raw_paragraphs:
         return ""
 
+    # Detect tables and build structured representations
+    table_regions: list[tuple[float, float, str]] = []  # (y0, y1, table_md)
+    try:
+        tables = page.find_tables()
+        for table in tables:
+            extracted = table.extract()
+            if not extracted:
+                continue
+            rows = len(extracted)
+            cols = max(len(row) for row in extracted) if rows else 0
+            if rows < 2 or cols < 2:
+                continue
+            tb = table.bbox  # (x0, y0, x1, y1)
+            tbl_md = f"\n[TABLE_START rows={rows} cols={cols}]\n"
+            for ri, row in enumerate(extracted):
+                cells = []
+                for ci, cell in enumerate(row):
+                    cell_text = (cell or "").strip().replace("\n", " ")
+                    cells.append(cell_text if cell_text else "—")
+                tbl_md += "| " + " | ".join(cells) + " |\n"
+                if ri == 0:
+                    tbl_md += "|" + "|".join(["---"] * len(cells)) + "|\n"
+            tbl_md += "[TABLE_END]\n"
+            table_regions.append((tb[1], tb[3], tbl_md))
+    except Exception:
+        pass  # find_tables may fail on some PDFs; degrade gracefully
+
     md = f"\n[[PAGE={page_no}]]\n\n"
-    md += "\n\n".join(paragraphs)
+    pi = 0
+    # Compute paragraph y-position as midpoint of its original block's y-range
+    para_y_mid = {}
+    for b in sorted_blocks:
+        if b[4].strip():
+            para_y_mid[b[4].strip()] = (b[1] + b[3]) / 2
+
+    for para in raw_paragraphs:
+        # Insert any table whose top edge falls before this paragraph
+        para_y = para_y_mid.get(para, 0)
+        while table_regions and table_regions[0][0] < para_y:
+            _, _, tbl_md = table_regions.pop(0)
+            md += tbl_md + "\n"
+        pi += 1
+        pid = f"{page_no}.{pi}"
+        md += f"[¶{pid}] {para}\n\n"
+
+    # Any remaining tables after all paragraphs
+    for _, _, tbl_md in table_regions:
+        md += tbl_md + "\n"
+
     return md
 
 
 def extract_page_text(page: fitz.Page) -> str:
-    """Plain text extraction with dual-column awareness."""
+    """Plain text extraction with dual-column awareness.
+
+    Shares block-classification and column-detection logic with the markdown
+    extraction path (_sort_dual_column) so both outputs agree on reading order.
+    """
     blocks = page.get_text("blocks")
     if not blocks:
         return page.get_text("text") or ""
 
-    page_width = page.rect.width
-    mid = page_width / 2
-
-    left: list[tuple] = []
-    right: list[tuple] = []
-    full: list[tuple] = []
-
-    for b in blocks:
-        x0, y0, x1, y1, text, *_ = b
-        if not text.strip() or x1 - x0 < 10:
-            continue
-        if x0 < mid - 40 and x1 > mid + 40:
-            full.append(b)
-        elif x1 <= mid + 40:
-            left.append(b)
-        elif x0 >= mid - 40:
-            right.append(b)
-        else:
-            full.append(b)
-
-    def _vertical_coverage(blocks: list[tuple]) -> float:
-        if not blocks:
-            return 0.0
-        ys = sorted([b[1] for b in blocks])
-        total = 0.0
-        current_start = ys[0]
-        current_end = ys[0]
-        for y in ys[1:]:
-            if y <= current_end + 20:
-                current_end = y
-            else:
-                total += current_end - current_start
-                current_start = y
-                current_end = y
-        total += current_end - current_start
-        ph = page.rect.height
-        return total / ph if ph > 0 else 0.0
-
+    left, right, full = _classify_blocks(blocks, page.rect)
     left_cov = _vertical_coverage(left)
     right_cov = _vertical_coverage(right)
-    is_dual = len(left) >= 3 and len(right) >= 3 and left_cov >= 0.30 and right_cov >= 0.30
+    is_dual = (
+        len(left) >= 3 and len(right) >= 3
+        and left_cov >= 0.30 and right_cov >= 0.30
+    )
     if not is_dual:
         return page.get_text("text") or ""
 
-    left.sort(key=lambda b: b[1])
-    right.sort(key=lambda b: b[1])
-    full.sort(key=lambda b: b[1])
-
-    body_top = min(left[0][1] if left else float("inf"), right[0][1] if right else float("inf"))
-    body_bottom = max(left[-1][3] if left else 0, right[-1][3] if right else 0)
-
-    header = [b for b in full if b[3] < body_top]
-    footer = [b for b in full if b[1] > body_bottom]
-    middle = [b for b in full if b not in header and b not in footer]
-
-    parts: list[tuple] = []
-    parts.extend(header)
-    parts.extend(left)
-    parts.extend(middle)
-    parts.extend(right)
-    parts.extend(footer)
-
-    return "\n".join(b[4] for b in parts)
+    sorted_blocks = _sort_dual_column(blocks, page.rect)
+    return "\n".join(b[4] for b in sorted_blocks)
 
 
 def write_text_artifacts(doc: fitz.Document, pdf: Path, artifact_dir: Path) -> Path:
@@ -749,6 +808,221 @@ def detect_figure_table_citation_order(doc: fitz.Document, filename: str) -> lis
 
 
 # ---------------------------------------------------------------------------
+# P2 detectors: Latin names, formula annotations, numeral style
+# ---------------------------------------------------------------------------
+
+# Pattern for Latin scientific binomials: "Genus species" or "G. species"
+_LATIN_BINOMIAL_RE = re.compile(
+    r"\b([A-Z][a-zàâäèéêëîïôöùûüÿçœ]+)\s+([a-zàâäèéêëîïôöùûüÿçœ]{3,})\b"
+)
+_LATIN_ABBREV_RE = re.compile(
+    r"\b([A-Z])\.\s*([a-zàâäèéêëîïôöùûüÿçœ]{3,})\b"
+)
+# Common Chinese biological indicators for proximity detection
+_BIO_SUFFIXES = re.compile(
+    r"(?:树|草|花|藤|竹|灌|藻|菌|霉|虫|鱼|鸟|鼠|蛇|蛙|螺|贝"
+    r"|小麦|玉米|水稻|大豆|棉花|油菜|马铃薯|番茄|烟草|拟南芥"
+    r"|线虫|果蝇|斑马鱼|小鼠|大鼠|家蚕|蜜蜂|蚕豆|苜蓿|杨树|松树"
+    r"|栎树|柳树|桦树|云杉|冷杉|落叶松|柏树|杉木|竹子|甘蔗|高粱"
+    r"|谷子|糜子|荞麦|燕麦|大麦|黑麦|花生|芝麻|向日葵|甜菜)"
+)
+
+
+def detect_latin_name_first_mention(doc: fitz.Document, filename: str) -> list[Finding]:
+    """Detect Latin scientific binomials and flag potential missing first-mention introductions.
+
+    For each unique Latin binomial, records its first occurrence page and nearby Chinese
+    context. Reports a mapping that helps the AI verify first-mention compliance.
+
+    This is an assistive detector — it surfaces information; the AI makes the final call.
+    """
+    findings: list[Finding] = []
+    latin_occurrences: dict[str, list[tuple[int, str]]] = {}  # "Genus species" -> [(page, context)]
+
+    for page_no, page in enumerate(doc, start=1):
+        text = page.get_text("text") or ""
+
+        for match in _LATIN_BINOMIAL_RE.finditer(text):
+            genus, species = match.group(1), match.group(2)
+            # Skip common false positives: abbreviations, units, statistical terms
+            if genus in ("Table", "Figure", "Fig", "Equation", "Model", "Group", "Treatment"):
+                continue
+            if species in ("the", "and", "for", "was", "with", "from", "that", "this", "were"):
+                continue
+            full_name = f"{genus} {species}"
+            start = max(0, match.start() - 80)
+            end = min(len(text), match.end() + 80)
+            context = text[start:end].replace("\n", " ")
+            if full_name not in latin_occurrences:
+                latin_occurrences[full_name] = []
+            latin_occurrences[full_name].append((page_no, context))
+
+    # Report each unique Latin binomial's first occurrence for AI cross-reference
+    for name, occurrences in sorted(latin_occurrences.items()):
+        first_page = occurrences[0][0]
+        ctx = occurrences[0][1][:120]
+        # Check if Chinese bio name is nearby on first occurrence
+        has_chinese_nearby = bool(_BIO_SUFFIXES.search(ctx))
+        findings.append(Finding(
+            file=filename,
+            page=first_page,
+            target=name,
+            category="latin-name",
+            suggestion=(
+                f"拉丁学名 '{name}' 首次出现在第{first_page}页。"
+                + ("附近检出中文物种名，请核实是否已在首次提及处标注拉丁学名。"
+                   if has_chinese_nearby else
+                   "请核实该学名在正文中首次提及时是否已给出中文名称及拉丁学名。")
+            ),
+            severity="medium",
+            source="rule",
+        ))
+
+    return findings
+
+
+def detect_formula_annotation(doc: fitz.Document, filename: str) -> list[Finding]:
+    """Check that formulas followed by '式中：' have all variables annotated with units.
+
+    Scans for the pattern: formula block → '式中：' → variable list.
+    Flags cases where '式中：' is present but variable annotations appear incomplete.
+    """
+    findings: list[Finding] = []
+    formula_keywords = re.compile(r"(式中|其中|这里)[：:]")
+
+    for page_no, page in enumerate(doc, start=1):
+        text = page.get_text("text") or ""
+
+        for match in formula_keywords.finditer(text):
+            keyword = match.group(1)
+            start = match.end()
+            # Look at the next ~300 chars for variable annotations
+            snippet = text[start:start + 300]
+            # Count variable-annotation patterns: "X 为/是/表示" or "X——"
+            var_patterns = re.findall(
+                r"[A-Za-zα-ωβγδεζηθικλμνξπρστυφχψω][′'*]?\s*(?:为|是|表示|——|—|，|,)",
+                snippet,
+            )
+            # Check for units in parentheses after variables
+            unit_patterns = re.findall(
+                r"[）\)]\s*[，,;；]|\)\s*为|\)\s*表示|[）\)]\s*$",
+                snippet,
+            )
+
+            if len(var_patterns) == 0:
+                # '式中：' present but no variable annotations detected
+                if keyword == "式中":
+                    findings.append(Finding(
+                        file=filename,
+                        page=page_no,
+                        target=match.group(0),
+                        category="formula",
+                        suggestion=(
+                            "检出'式中：'但未识别到后续变量注解。"
+                            "请核查公式后是否按规范以'式中：'开头逐项注解变量，"
+                            "并在括号内注明单位。"
+                        ),
+                        severity="medium",
+                        source="rule",
+                    ))
+            elif len(unit_patterns) < len(var_patterns) * 0.5:
+                # Some variables may lack unit annotations
+                findings.append(Finding(
+                    file=filename,
+                    page=page_no,
+                    target=match.group(0),
+                    category="formula",
+                    suggestion=(
+                        f"公式注解区域检出{len(var_patterns)}个疑似变量，"
+                        f"但仅{len(unit_patterns)}处疑似单位括号。"
+                        "请核查每个变量是否均按规范注明了单位。"
+                    ),
+                    severity="low",
+                    source="rule",
+                ))
+
+    return findings
+
+
+def detect_numeral_style(doc: fitz.Document, filename: str) -> list[Finding]:
+    """Check GB/T 15835 numeral style: consistent use of Arabic vs Chinese numerals.
+
+    Flags:
+    - Chinese numerals in technical contexts where Arabic is expected
+    - Mixed date formats (e.g., '2025年3月' vs '2025-03' in the same document)
+    - Range connectors inconsistency (～ vs — vs -)
+    """
+    findings: list[Finding] = []
+    all_text_parts: list[str] = []
+
+    for page_no, page in enumerate(doc, start=1):
+        text = page.get_text("text") or ""
+        all_text_parts.append(text)
+
+        # Flag Chinese numerals used where Arabic is expected in technical contexts
+        # Pattern: "表X" or "图X" where X is a Chinese numeral
+        chinese_fig_table = re.findall(r"([图表])[一二三四五六七八九十]{1,3}(?!\d)", text)
+        if chinese_fig_table:
+            findings.append(Finding(
+                file=filename,
+                page=page_no,
+                target=chinese_fig_table[0][0] + chinese_fig_table[0][1],
+                category="numeral-style",
+                suggestion=(
+                    f"检出中文数字用于图表编号（'{chinese_fig_table[0][0]}{chinese_fig_table[0][1]}'）。"
+                    "GB/T 15835建议技术文献中图表编号使用阿拉伯数字。"
+                ),
+                severity="low",
+                source="rule",
+            ))
+
+        # Range connector check: detect mixed usage of ~, —, -
+        ranges = re.findall(r"\d+\s*([～~—\-])\s*\d+", text)
+        connectors = set(connector for connector in ranges)
+        if len(connectors) >= 2:
+            findings.append(Finding(
+                file=filename,
+                page=page_no,
+                target="range-connector",
+                category="numeral-style",
+                suggestion=(
+                    f"同一页检出不统一的数值范围连接符：{connectors}。"
+                    "GB/T 15835建议全文中范围连接符保持一致。"
+                ),
+                severity="low",
+                source="rule",
+            ))
+
+    # Cross-page: check date format consistency across the document
+    full_text = "\n".join(all_text_parts)
+    date_formats = []
+    if re.search(r"\d{4}\s*年\s*\d{1,2}\s*月", full_text):
+        date_formats.append("YYYY年MM月")
+    if re.search(r"\d{4}-\d{2}-\d{2}", full_text):
+        date_formats.append("YYYY-MM-DD")
+    if re.search(r"\d{4}/\d{2}/\d{2}", full_text):
+        date_formats.append("YYYY/MM/DD")
+    if re.search(r"\d{4}\.\d{2}\.\d{2}", full_text):
+        date_formats.append("YYYY.MM.DD")
+
+    if len(date_formats) >= 2:
+        findings.append(Finding(
+            file=filename,
+            page=1,
+            target="date-format",
+            category="numeral-style",
+            suggestion=(
+                f"全文中检出不统一的日期格式：{', '.join(date_formats)}。"
+                "建议统一为一种格式（推荐'YYYY年MM月DD日'或'YYYY-MM-DD'）。"
+            ),
+            severity="low",
+            source="rule",
+        ))
+
+    return findings
+
+
+# ---------------------------------------------------------------------------
 # Prepare phase: extract + rules + review context
 # ---------------------------------------------------------------------------
 
@@ -797,6 +1071,9 @@ def prepare_document(pdf: Path, output_dir: Path, render_dpi: int = 200) -> dict
         findings.extend(detect_caption_order(doc, pdf.name))
         findings.extend(detect_reference_sequence(doc, pdf.name))
         findings.extend(detect_figure_table_citation_order(doc, pdf.name))
+        findings.extend(detect_latin_name_first_mention(doc, pdf.name))
+        findings.extend(detect_formula_annotation(doc, pdf.name))
+        findings.extend(detect_numeral_style(doc, pdf.name))
         for page_no, page in enumerate(doc, start=1):
             findings.extend(detect_text_rules(pdf.name, page_no, extract_page_text(page)))
 
@@ -864,24 +1141,51 @@ def _build_review_context(pdf: Path, doc: fitz.Document, paper_dir: Path, findin
     else:
         parts.append("No rule-based findings detected.\n")
 
-    # Pages needing visual inspection
-    visual_pages: set[int] = set()
+    # Pages needing visual inspection — track reason per page
+    visual_pages: dict[int, list[str]] = {}  # page_no -> list of reasons
     for page_no, page in enumerate(doc, start=1):
         text = page.get_text("text") or ""
-        if any(kw in text for kw in ("图", "表", "公式", "Fig.", "Table", "Equation", "式中")):
-            visual_pages.add(page_no)
-        # Also add pages with findings that have fallback_rect
+
+        # Keyword-based detection
+        page_kws = [kw for kw in ("图", "表", "公式", "Fig.", "Table", "Equation", "式中") if kw in text]
+        if page_kws:
+            visual_pages.setdefault(page_no, []).append(f"keyword: {', '.join(page_kws)}")
+
+        # Structural detection: pages with embedded images (catches pure-graphic pages
+        # that have no extractable text matching keywords)
+        images = page.get_images(full=True)
+        if images:
+            visual_pages.setdefault(page_no, []).append(
+                f"embedded images: {len(images)} image object(s)"
+            )
+
+        # Findings with coordinate data on this page
         for f in findings:
             if f.page == page_no and f.fallback_rect:
-                visual_pages.add(page_no)
+                visual_pages.setdefault(page_no, []).append(
+                    f"finding[{f.category}]: {f.suggestion[:80]}"
+                )
 
     parts.append("# Pages Requiring Visual Inspection\n")
     if visual_pages:
-        for p in sorted(visual_pages):
-            parts.append(f"- Page {p}: `pages/page_{p:03d}.png`")
+        parts.append("Open each PNG and cross-check against extracted text findings:")
         parts.append("")
-        parts.append("For each listed page, open the corresponding PNG and verify figure/table/formula layout, "
-                     "axis labels, legend, watermark, three-line table format, subscript/superscript visual rendering, etc.")
+        for p in sorted(visual_pages):
+            reasons = "; ".join(visual_pages[p])
+            parts.append(f"- Page {p}: `pages/page_{p:03d}.png`  — {reasons}")
+        parts.append("")
+        parts.append("**How to inspect each page:**")
+        parts.append("- Formulas: check italic vs upright, subscript position/size, OMath/MathType artifacts (broken baselines, overlapping components, missing glyphs)")
+        parts.append("- Figures: caption below figure, bilingual match, axis labels+units readable, legend present, data lines distinguishable, no watermark/overlap/placeholder, map has 审图号")
+        parts.append("- Tables: caption above table, three-line table format, header units in negative exponent form, zero=\"0\" and unmeasured=\"—\"")
+        parts.append("- Layout: no cropped content, no unexpected blank pages, header/footer consistency")
+        parts.append("")
+        parts.append("**Cross-check rule**: If extracted text suggests an issue (e.g., subscript error, italic missing) but the PNG shows correct visual rendering, DISMISS the finding. Extraction artifacts do NOT count as errors.")
+        parts.append("")
+        parts.append("After visual inspection, record in a `_visual_review` section of your compiled findings JSON:")
+        parts.append("- `visual_pages_checked`: number of pages you actually opened and inspected")
+        parts.append("- `visual_dismissed`: list of finding IDs you dismissed because visual rendering was correct")
+        parts.append("- `visual_new`: list of new issues discovered only through visual inspection (if any)")
     else:
         parts.append("No specific pages flagged for visual inspection.\n")
 
@@ -1040,10 +1344,27 @@ def _add_end_of_doc_summary(doc: fitz.Document, findings: list[Finding]) -> int:
     return count
 
 
-def load_findings(path: Path) -> list[Finding]:
+def load_findings(path: Path) -> tuple[list[Finding], dict[str, object]]:
+    """Load reviewed findings JSON.
+
+    Returns (findings, visual_review_meta).
+    Handles both old flat-list format and new wrapped format with _visual_review.
+    """
     data = json.loads(path.read_text(encoding="utf-8"))
+    visual_meta: dict[str, object] = {}
+
+    if isinstance(data, dict) and "findings" in data:
+        # New wrapped format: {"_visual_review": {...}, "findings": [...]}
+        visual_meta = data.get("_visual_review", {}) or {}
+        items = data["findings"]
+    elif isinstance(data, list):
+        # Old flat-list format
+        items = data
+    else:
+        items = []
+
     findings: list[Finding] = []
-    for item in data:
+    for item in items:
         rect = item.get("fallback_rect")
         findings.append(
             Finding(
@@ -1059,7 +1380,160 @@ def load_findings(path: Path) -> list[Finding]:
                 end_of_doc=bool(item.get("end_of_doc", False)),
             )
         )
-    return findings
+    return findings, visual_meta
+
+
+# Categories whose findings MUST be visually confirmed against rendered PNGs.
+_VISUAL_CATEGORIES = frozenset({
+    "stat-symbol", "subscript", "formula", "figure", "table",
+    "font-style", "script",
+})
+
+
+def validate_reviewed_findings(
+    path: Path,
+    findings: list[Finding],
+    visual_meta: dict[str, object],
+    page_count: int = 0,
+) -> tuple[list[str], list[str]]:
+    """Validate reviewed findings before annotation.
+
+    Returns (errors, warnings).
+    - errors: must-fix issues — annotation should abort in strict mode.
+    - warnings: suspicious patterns — print but don't block.
+    """
+    errors: list[str] = []
+    warnings: list[str] = []
+
+    # --- Visual review metadata checks ---
+
+    if not visual_meta:
+        errors.append(
+            "MISSING _visual_review: no visual review metadata found. "
+            "Step 4 (Visual Inspection) and Step 5 (Cross-Check) were likely skipped."
+        )
+    else:
+        pages_checked = visual_meta.get("pages_checked", [])
+        if not pages_checked:
+            errors.append(
+                "EMPTY pages_checked: no page PNGs were reported as inspected. "
+                "Visual review was not performed."
+            )
+
+        dismissed = visual_meta.get("dismissed", [])
+        visual_findings = [f for f in findings if f.category in _VISUAL_CATEGORIES]
+        if visual_findings and not dismissed:
+            warnings.append(
+                f"ZERO dismissed: {len(visual_findings)} visual-category findings, none dismissed. "
+                "Rule detectors nearly always produce some false positives — verify Step 5 was performed."
+            )
+
+    # --- Finding reasonability checks ---
+
+    valid_severities = frozenset({"high", "medium", "low"})
+    targets_seen: set[tuple[int, str]] = set()
+    empty_target_count = 0
+    empty_suggestion_count = 0
+    bad_page_count = 0
+    bad_severity_count = 0
+    duplicate_count = 0
+    gibberish_count = 0
+
+    for f in findings:
+        # Empty target
+        if not f.target or not f.target.strip():
+            empty_target_count += 1
+            continue
+        # Empty suggestion
+        if not f.suggestion or not f.suggestion.strip():
+            empty_suggestion_count += 1
+        # Page bounds (0 = check skipped)
+        if page_count > 0 and (f.page < 1 or f.page > page_count):
+            bad_page_count += 1
+        # Valid severity
+        if f.severity not in valid_severities:
+            bad_severity_count += 1
+        # Duplicate target on same page
+        key = (f.page, f.target.strip())
+        if key in targets_seen:
+            duplicate_count += 1
+        else:
+            targets_seen.add(key)
+        # Gibberish target (random keystrokes, very unlikely in real text)
+        t = f.target.strip()
+        if len(t) >= 8 and not any(ord(c) > 127 for c in t):
+            # Pure ASCII target >= 8 chars: check for improbably random strings
+            if re.search(r"[bcdfghjklmnpqrstvwxyz]{6,}", t, re.IGNORECASE):
+                gibberish_count += 1
+
+    if empty_target_count:
+        errors.append(f"EMPTY target: {empty_target_count} finding(s) have no target text.")
+    if empty_suggestion_count:
+        errors.append(f"EMPTY suggestion: {empty_suggestion_count} finding(s) have no suggestion.")
+    if bad_page_count:
+        errors.append(
+            f"PAGE OUT OF BOUNDS: {bad_page_count} finding(s) reference pages "
+            f"outside the document's 1–{page_count} range."
+        )
+    if bad_severity_count:
+        warnings.append(
+            f"INVALID severity: {bad_severity_count} finding(s) use non-standard severity "
+            f"(expected high/medium/low)."
+        )
+    if duplicate_count:
+        warnings.append(
+            f"DUPLICATE targets: {duplicate_count} finding(s) have the same (page, target) as another."
+        )
+    if gibberish_count:
+        errors.append(
+            f"GIBBERISH target: {gibberish_count} finding(s) have implausible ASCII target text "
+            f"(probable AI hallucination)."
+        )
+
+    # --- Visual-category findings missing visual_confirmed ---
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        items = data.get("findings", data) if isinstance(data, dict) else data
+        if isinstance(items, list):
+            unchecked: list[str] = []
+            for item in items:
+                cat = item.get("category", "")
+                if cat in _VISUAL_CATEGORIES and "visual_confirmed" not in item:
+                    unchecked.append(
+                        f"page {item.get('page', '?')} [{cat}]: {item.get('suggestion', '')[:60]}"
+                    )
+            if unchecked:
+                warnings.append(
+                    f"MISSING visual_confirmed on {len(unchecked)} visual-category finding(s): "
+                    + "; ".join(unchecked[:5])
+                    + (f" ... and {len(unchecked) - 5} more" if len(unchecked) > 5 else "")
+                )
+    except (json.JSONDecodeError, KeyError, TypeError):
+        pass
+
+    # --- Count anomaly detection ---
+    if page_count > 0 and findings:
+        pages_with_findings: dict[int, int] = {}
+        for f in findings:
+            pages_with_findings[f.page] = pages_with_findings.get(f.page, 0) + 1
+        if pages_with_findings:
+            max_per_page = max(pages_with_findings.values())
+            avg_per_page = len(findings) / page_count
+            if max_per_page > avg_per_page * 5 and max_per_page >= 10:
+                burst_page = max(pages_with_findings, key=pages_with_findings.get)
+                warnings.append(
+                    f"BURST anomaly: page {burst_page} has {max_per_page} findings "
+                    f"(avg {avg_per_page:.1f}/page). Possible AI focus drift."
+                )
+
+        high_count = sum(1 for f in findings if f.severity == "high")
+        if high_count > len(findings) * 0.5 and len(findings) >= 5:
+            warnings.append(
+                f"SEVERITY inflation: {high_count}/{len(findings)} findings are 'high' severity "
+                f"({100*high_count//len(findings)}%). Verify these are genuinely high-severity."
+            )
+
+    return errors, warnings
 
 
 def annotate_pdf(pdf: Path, output_dir: Path, findings: list[Finding], same_name: bool) -> dict[str, object]:
@@ -1183,6 +1657,7 @@ def main() -> int:
     parser.add_argument("--same-name", action="store_true", help="Keep output PDF filenames unchanged.")
     parser.add_argument("--limit", type=int, default=0, help="Maximum PDFs to process; 0 means all.")
     parser.add_argument("--render-dpi", type=int, default=200, help="DPI for page PNG rendering.")
+    parser.add_argument("--force", action="store_true", help="Annotate even if validation finds errors.")
     parser.add_argument("--verbose", action="store_true", help="Print full JSON results.")
     args = parser.parse_args()
 
@@ -1219,7 +1694,35 @@ def main() -> int:
 
     if args.mode == "annotate":
         if args.findings_json:
-            findings = load_findings(args.findings_json)
+            findings, visual_meta = load_findings(args.findings_json)
+
+            # Determine page count from first PDF for reasonability checks
+            _page_count = 0
+            if pdfs:
+                try:
+                    _doc = fitz.open(pdfs[0])
+                    _page_count = _doc.page_count
+                    _doc.close()
+                except Exception:
+                    pass
+
+            errors, warnings = validate_reviewed_findings(
+                args.findings_json, findings, visual_meta, page_count=_page_count,
+            )
+            if errors or warnings:
+                print("\n=== FINDINGS VALIDATION ===", file=sys.stderr)
+                for e in errors:
+                    print(f"  ERROR: {e}", file=sys.stderr)
+                for w in warnings:
+                    print(f"  WARNING: {w}", file=sys.stderr)
+                print("", file=sys.stderr)
+
+            if errors and not args.force:
+                raise SystemExit(
+                    "Validation found errors. Annotation aborted.\n"
+                    "  Re-run with --force to bypass (not recommended).\n"
+                    "  Or fix the findings JSON and try again."
+                )
         else:
             raise SystemExit("--findings-json is required in annotate mode")
 

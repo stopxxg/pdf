@@ -316,7 +316,8 @@ def main() -> int:
     parser = argparse.ArgumentParser(
         description="High-precision Word proofreading pipeline for Chinese academic journals.",
     )
-    parser.add_argument("--root", type=Path, required=True, help="Folder containing source .docx files.")
+    parser.add_argument("--root", type=Path, help="Folder containing source .docx files. Optional when --file is given.")
+    parser.add_argument("--file", type=Path, help="Process a single specific .docx file instead of scanning a folder.")
     parser.add_argument("--output", type=Path, help="Output folder. Defaults to ROOT/annotated_docxs.")
     parser.add_argument("--mode", choices=["prepare", "annotate"], default="prepare",
                         help="prepare: extract text, run rule checks, build review context. "
@@ -327,11 +328,18 @@ def main() -> int:
     parser.add_argument("--verbose", action="store_true", help="Print full JSON results instead of compact summary.")
     args = parser.parse_args()
 
-    root = args.root.resolve()
-    output_dir = resolve_output(root, args.output)
-    docxs = docxs_under(root, output_dir)
-    if args.limit > 0:
-        docxs = docxs[: args.limit]
+    if args.file:
+        docxs = [args.file.resolve()]
+        root = args.file.resolve().parent
+        output_dir = resolve_output(root, args.output)
+    else:
+        if not args.root:
+            raise SystemExit("Either --root or --file is required.")
+        root = args.root.resolve()
+        output_dir = resolve_output(root, args.output)
+        docxs = docxs_under(root, output_dir)
+        if args.limit > 0:
+            docxs = docxs[: args.limit]
 
     results: list[dict[str, object]] = []
     if args.mode == "prepare":

@@ -298,7 +298,6 @@ def detect_text_rules(filename: str, page_no: int, text: str) -> list[Finding]:
     text_targets: list[tuple[str, str, str]] = [
         ("http：", "文字/标点", "URL存在全角冒号，可能导致链接失效。建议改为半角“http://”或“https://”。"),
         ("https：", "文字/标点", "URL存在全角冒号，可能导致链接失效。建议改为半角“https://”。"),
-        ("∥", "文字/标点", "URL中疑似使用了异常双斜线符号。建议改为半角“//”。"),
         ("0. 001", "文字/标点", "数值“0. 001”中存在多余空格。建议改为“0.001”。"),
         ("，。", "文字/标点", "连续出现逗号和句号。建议删除多余标点。"),
         ("。。", "文字/标点", "连续出现两个句号。建议删除多余标点。"),
@@ -329,8 +328,6 @@ def detect_text_rules(filename: str, page_no: int, text: str) -> list[Finding]:
         (r"图\s+\d+", "文字/标点", "“图”与编号之间存在多余空格，建议改为“图1”格式。"),
         (r"表\s+\d+", "文字/标点", "“表”与编号之间存在多余空格，建议改为“表1”格式。"),
         (r"et al\.[A-Z]", "文字/标点", "“et al.”后缺少空格，建议改为“et al. Author”。"),
-        (r"[a-zA-Z]，[a-zA-Z]", "文字/标点", "英文文本中使用了全角逗号，建议改为半角逗号。"),
-        (r"[a-zA-Z]。[a-zA-Z]", "文字/标点", "英文文本中使用了全角句号，建议改为半角句点。"),
     ])
 
     lines = [line.strip() for line in text.splitlines() if compact(line)]

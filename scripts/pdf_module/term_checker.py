@@ -70,7 +70,7 @@ def _extract_terms(text: str) -> set[str]:
     return terms
 
 
-def _find_variants(full_text: str, terms: set[str]) -> list[tuple[str, str, int]]:
+def _find_variants(full_text: str, terms: set[str], front_text: str) -> list[tuple[str, str, int]]:
     """Find potential inconsistent variants of key terms."""
     variants: list[tuple[str, str, int]] = []
     stop_words = {"的", "是", "在", "和", "与", "及", "或", "为", "了", "对", "将", "从", "到", "以"}
@@ -84,10 +84,18 @@ def _find_variants(full_text: str, terms: set[str]) -> list[tuple[str, str, int]
                 continue
             if sub in full_text and sub != term:
                 count = full_text.count(sub)
-                # Only flag when the full term also appears frequently
-                # and the variant is not overwhelmingly dominant (which suggests intentional abbreviation)
-                if count >= 3 and orig_count >= 3 and count <= orig_count * 2:
-                    variants.append((term, sub, count))
+                # Higher thresholds to reduce false positives
+                if count < 5 or orig_count < 5:
+                    continue
+                if count > orig_count * 2:
+                    continue
+                # Skip if the shorter form also appears in front matter (intentional abbreviation)
+                if sub in front_text:
+                    continue
+                # Skip if length ratio is too low (likely a coincidental substring, not an abbreviation)
+                if len(sub) < len(term) * 0.6:
+                    continue
+                variants.append((term, sub, count))
     return variants
 
 
@@ -100,7 +108,7 @@ def check_terms_text(full_text: str, filename: str) -> list[TermIssue]:
 
     issues: list[TermIssue] = []
 
-    for original, variant, count in _find_variants(full_text, terms):
+    for original, variant, count in _find_variants(full_text, terms, front_text):
         issues.append(
             TermIssue(
                 page=0,

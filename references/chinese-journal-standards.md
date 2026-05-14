@@ -37,11 +37,10 @@ Check:
 
 Check:
 
-- Chinese body text normally uses full-width Chinese punctuation; English references and URLs use half-width punctuation unless journal style says otherwise.
-- Do not use full-width colon inside URLs, such as `http：//`.
+- Do not use full-width colon inside URLs, such as `http：//` (functional issue). Do NOT flag general full-width/half-width punctuation mixing in body text or references.
 - Avoid inappropriate顿号 in predicate-object or clause-level parallel structures.
 - Use semicolons carefully in lists; if the next sentence changes subject, use a period.
-- Parentheses style should be consistent: Chinese full-width parentheses in Chinese prose, half-width in English prose or formula contexts when required.
+- Parentheses style should be functionally correct; do NOT annotate purely cosmetic full-width vs half-width mixing.
 - Use correct range connectors: Chinese year ranges often use an en dash or full-width dash according to journal style; mathematical ranges and reference pages should be consistent.
 
 ## Numerals, Units, And Quantities

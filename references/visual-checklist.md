@@ -31,8 +31,8 @@ Use this checklist when reading rendered page PNGs during PDF proofreading. Read
 - No cropped content at page edges.
 - No unexpected blank pages.
 - Header/footer consistency across pages.
-- Chinese body text uses full-width Chinese punctuation; English references and URLs use half-width punctuation.
 - Do not mark an issue if the extracted text is flattened but the rendered image is correct.
+- Do NOT flag general full-width/half-width punctuation mixing as an error.
 
 ## Cost Control
 
